@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>GPT Outlook Register · 团子喵 WebUI</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="bell">🔔</span>
+    <h1>GPT Outlook Register</h1>
+    <span class="sub">纯协议 · Outlook 接码 · 团子喵驱动</span>
+  </div>
+  <div class="stats" id="statsBar">
+    <span class="pill"><b>0</b> 总计</span>
+    <span class="pill ok"><b>0</b> 可用</span>
+    <span class="pill warn"><b>0</b> 进行中</span>
+    <span class="pill done"><b>0</b> 已完成</span>
+    <span class="pill bad"><b>0</b> 失败</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- 左：批量导入 + 注册控制 -->
+  <section class="card">
+    <h2>📥 批量导入接码号</h2>
+    <p class="hint">每行一个，4 段格式（用 <code>----</code> 分隔）：<br>
+       <code>email----password----client_id----refresh_token</code></p>
+    <textarea id="importText" rows="8" placeholder="charles123@outlook.jp----P@ssw0rd----9e5f94bc-...----M.C538_..."></textarea>
+    <div class="row">
+      <button id="btnImport" class="primary">导入到号池</button>
+      <span id="importResult" class="result"></span>
+    </div>
+
+    <hr>
+
+    <h2>▶️ 触发注册</h2>
+    <div class="form">
+      <label>邮箱 <small>(留空 = 自动 claim 下一个 available)</small>
+        <input id="regEmail" placeholder="留空 = 自动选号 / 或填指定邮箱">
+      </label>
+      <label>代理 <small>(直连留空)</small>
+        <input id="regProxy" placeholder="socks5://user:pass@host:1080">
+      </label>
+      <label>OTP 等待秒数
+        <input id="regOtpTimeout" type="number" value="180" min="30" max="600">
+      </label>
+
+      <div class="row">
+        <button id="btnRun" class="primary">▶ 开始注册（单个）</button>
+        <span id="runStatus" class="result"></span>
+      </div>
+
+      <div class="auto-bar">
+        <span class="auto-title">🤖 全自动批量</span>
+        <button id="btnAutoStart" class="primary">▶ 自动跑号池</button>
+        <button id="btnAutoPause" disabled>⏸ 暂停</button>
+        <button id="btnAutoResume" disabled>▶ 恢复</button>
+        <button id="btnAutoStop" disabled>⏹ 停止</button>
+        <label class="check inline-check" title="两轮之间的冷却（防风控）">
+          冷却:<input id="autoCoolDown" type="number" value="3" min="0" max="120" style="width:60px;display:inline-block;margin-left:4px"> 秒
+        </label>
+      </div>
+      <div class="row">
+        <span id="autoStatus" class="auto-status">⚪ 未运行</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 右：日志 + 列表 -->
+  <section class="card">
+    <h2>📜 实时日志</h2>
+    <div id="logBox" class="log"></div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="pool">号池</button>
+      <button class="tab" data-tab="registered">注册结果</button>
+      <button class="tab" data-tab="runs">运行记录</button>
+    </div>
+
+    <div class="tab-content" id="tab-pool">
+      <div class="row">
+        <select id="poolFilter">
+          <option value="">全部</option>
+          <option value="available">available</option>
+          <option value="in_use">in_use</option>
+          <option value="done">done</option>
+          <option value="failed">failed</option>
+        </select>
+        <button id="btnRefreshPool">刷新</button>
+      </div>
+      <table id="poolTable">
+        <thead><tr><th>邮箱</th><th>状态</th><th>失败原因</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="tab-content hidden" id="tab-registered">
+      <div class="row">
+        <button id="btnRefreshReg">刷新</button>
+      </div>
+      <table id="regTable">
+        <thead><tr><th>邮箱</th><th>access_token</th><th>时间</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="tab-content hidden" id="tab-runs">
+      <div class="row">
+        <button id="btnRefreshRuns">刷新</button>
+      </div>
+      <table id="runTable">
+        <thead><tr><th>run_id</th><th>邮箱</th><th>状态</th><th>开始时间</th><th>错误</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<!-- 凭证查看模态框 -->
+<div class="modal hidden" id="credModal">
+  <div class="modal-body">
+    <div class="modal-head">
+      <h3 id="credTitle">凭证</h3>
+      <button id="credCopyJson">📋 复制全部 JSON</button>
+      <button id="credClose">✕</button>
+    </div>
+    <div id="credFields" class="cred-fields"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

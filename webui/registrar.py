@@ -1,0 +1,256 @@
+"""注册 worker：调 auth_flow.run_register，并把日志/状态实时推到队列。
+
+每个注册任务跑在独立线程；通过 `RunLogger` 把 `logging` 记录 + tail 状态推
+到队列，前端用 SSE 实时收日志。
+"""
+from __future__ import annotations
+
+import logging
+import os
+import queue
+import sys
+import threading
+import time
+import traceback
+import uuid
+from pathlib import Path
+from typing import Optional
+
+ROOT = Path(__file__).resolve().parents[1]  # gpt-outlook-register/
+sys.path.insert(0, str(ROOT))
+
+from config import Config  # noqa: E402
+from mail_outlook import OutlookMailProvider  # noqa: E402
+from auth_flow import AuthFlow  # noqa: E402
+
+from . import db  # noqa: E402
+
+# run_id -> queue of log strings; sentinel = None 表示流结束
+_run_queues: dict[str, queue.Queue] = {}
+_lock = threading.Lock()
+
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class QueueLogHandler(logging.Handler):
+    """把 logging 记录扔进 run queue + 写 log 文件。"""
+
+    def __init__(self, run_id: str, log_file: Path):
+        super().__init__()
+        self.run_id = run_id
+        self._fh = open(log_file, "a", encoding="utf-8")
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            msg = self.format(record)
+            self._fh.write(msg + "\n")
+            self._fh.flush()
+            q = _run_queues.get(self.run_id)
+            if q is not None:
+                q.put(msg)
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+        super().close()
+
+
+def _emit_status(run_id: str, kind: str, payload: dict | str = ""):
+    """前端约定：以 `__EVENT__:` 开头的行被解析成 JSON 状态事件。"""
+    import json as _json
+    q = _run_queues.get(run_id)
+    if q is None:
+        return
+    body = payload if isinstance(payload, dict) else {"message": str(payload)}
+    body["kind"] = kind
+    q.put("__EVENT__:" + _json.dumps(body, ensure_ascii=False))
+
+
+def _do_register(
+    run_id: str,
+    account: dict,
+    options: dict,
+    log_file: Path,
+):
+    """实际注册任务。
+
+    options:
+        want_access_token: bool
+        want_session_token: bool
+        want_refresh_token: bool
+        proxy: Optional[str]
+        otp_timeout: int
+        allow_existing_login: bool
+    """
+    handler = QueueLogHandler(run_id, log_file)
+    handler.setLevel(logging.INFO)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    # 第一次需要的话提到 INFO 级别
+    if root_logger.level > logging.INFO or root_logger.level == 0:
+        root_logger.setLevel(logging.INFO)
+
+    email = account["email"]
+    saved_env = {}
+
+    try:
+        # 注入环境变量（不污染全局，跑完恢复）
+        env_overrides = {}
+        # outlook 接码邮箱常被 OpenAI 走 passwordless_signup 流程（新号收码而非设密码），
+        # auth_flow 会误判为"已有账号"分支 → 不设 WEBUI_ALLOW_LOGIN 会 fast-fail。
+        # 单号 WebUI 场景下 fast-fail 没意义（批量跑才需要"跳过被识别的号"），故强制 ON。
+        env_overrides["WEBUI_ALLOW_LOGIN"] = "1"
+        env_overrides["OTP_TIMEOUT"] = str(int(options.get("otp_timeout") or 180))
+        # 用户不要 refresh_token → 直接跳过 Codex OAuth（每次都失败浪费 ~10s + 一堆告警）
+        if not options.get("want_refresh_token", True):
+            env_overrides["SKIP_OAUTH_TOKEN_EXCHANGE"] = "1"
+            env_overrides["OAUTH_CODEX_RT_EXCHANGE"] = "0"
+            env_overrides["OAUTH_CODEX_RT_BEFORE_CALLBACK"] = "0"
+        # PROXY 走 cfg.proxy，无需 env
+        for k, v in env_overrides.items():
+            saved_env[k] = os.environ.get(k)
+            os.environ[k] = v
+
+        cfg = Config()
+        cfg.proxy = (options.get("proxy") or "").strip() or None
+
+        mail = OutlookMailProvider(
+            email=account["email"],
+            password=account.get("password", ""),
+            client_id=account["client_id"],
+            refresh_token=account["refresh_token"],
+        )
+
+        flow = AuthFlow(cfg)
+        _emit_status(run_id, "phase", {"phase": "starting", "email": email})
+        logging.getLogger("registrar").info(f"[register] 开始: {email}")
+
+        partial = False
+        d: dict
+        try:
+            result = flow.run_register(mail)
+            d = result.to_dict()
+        except RuntimeError as e:
+            # 部分凭证也算成功（OTP 验证通过 + create_account 成功 → flow.result 有 token）
+            d = flow.result.to_dict()
+            need_access = options.get("want_access_token", True)
+            need_session = options.get("want_session_token", True)
+            need_refresh = options.get("want_refresh_token", True)
+            # 用户勾选的凭证全拿到 → 算正常完成（不视为 partial）
+            wanted_ok = (
+                (not need_access or d.get("access_token"))
+                and (not need_session or d.get("session_token"))
+                and (not need_refresh or d.get("refresh_token"))
+            )
+            has_any = bool(
+                d.get("access_token") or d.get("refresh_token") or d.get("session_token")
+            )
+            if wanted_ok and has_any:
+                logging.getLogger("registrar").warning(
+                    f"[register] 流程末段异常但用户勾选的凭证已齐: {e}"
+                )
+            elif has_any:
+                partial = True
+                logging.getLogger("registrar").warning(
+                    f"[register] 部分凭证 (缺用户勾选的某项): {e}"
+                )
+            else:
+                raise
+
+        # ─ 用户选项过滤：未勾选的字段从结果里抹掉，DB 只存用户想要的
+        full = d
+        d = {
+            "email": full.get("email", ""),
+            "password": full.get("password", ""),
+        }
+        if options.get("want_access_token", True):
+            d["access_token"] = full.get("access_token", "")
+        if options.get("want_session_token", True):
+            d["session_token"] = full.get("session_token", "")
+            d["cookie_header"] = full.get("cookie_header", "")  # 同样是浏览器注入用
+        if options.get("want_refresh_token", True):
+            d["refresh_token"] = full.get("refresh_token", "")
+            d["id_token"] = full.get("id_token", "")
+
+        # 落库
+        db.save_registered(d)
+        db.mark_done(email)
+
+        result_summary = {
+            "email": d.get("email"),
+            "access_token_len": len(d.get("access_token") or ""),
+            "session_token_len": len(d.get("session_token") or ""),
+            "refresh_token_len": len(d.get("refresh_token") or ""),
+            "partial": partial,
+        }
+        _emit_status(run_id, "done", result_summary)
+        logging.getLogger("registrar").info(
+            f"[register] 完成 email={d.get('email')} "
+            f"at={result_summary['access_token_len']} "
+            f"st={result_summary['session_token_len']} "
+            f"rt={result_summary['refresh_token_len']}"
+        )
+        db.finish_run(run_id, "done")
+
+    except Exception as e:
+        err = str(e)
+        logging.getLogger("registrar").error(f"[register] 失败: {err}")
+        logging.getLogger("registrar").error(traceback.format_exc())
+        db.mark_failed(email, err)
+        db.finish_run(run_id, "failed", err)
+        _emit_status(run_id, "error", {"message": err})
+
+    finally:
+        # 还原 env
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        # 关闭 handler
+        try:
+            root_logger.removeHandler(handler)
+            handler.close()
+        except Exception:
+            pass
+        q = _run_queues.get(run_id)
+        if q is not None:
+            q.put(None)  # sentinel: 流结束
+
+
+def start_registration(account: dict, options: dict) -> str:
+    """启动一次注册任务，返回 run_id。"""
+    run_id = uuid.uuid4().hex[:12]
+    log_file = LOG_DIR / f"{run_id}.log"
+    db.create_run(run_id, account["email"], str(log_file))
+
+    q: queue.Queue = queue.Queue()
+    with _lock:
+        _run_queues[run_id] = q
+
+    th = threading.Thread(
+        target=_do_register,
+        args=(run_id, account, options, log_file),
+        daemon=True,
+        name=f"register-{run_id}",
+    )
+    th.start()
+    return run_id
+
+
+def get_run_queue(run_id: str) -> Optional[queue.Queue]:
+    return _run_queues.get(run_id)
+
+
+def remove_run_queue(run_id: str) -> None:
+    with _lock:
+        _run_queues.pop(run_id, None)

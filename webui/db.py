@@ -1,0 +1,357 @@
+"""SQLite 号池 + 注册结果存储。
+
+表结构：
+  outlook_accounts: 接码号池（4 段格式入库 + 状态机）
+  registered:       注册成功结果（凭证 JSON）
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from typing import Optional
+
+DB_PATH = Path(__file__).resolve().parent / "webui.db"
+
+_lock = threading.Lock()  # SQLite 写入串行化
+
+
+def _conn() -> sqlite3.Connection:
+    con = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=30)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    return con
+
+
+def init_db():
+    con = _conn()
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS outlook_accounts (
+            email           TEXT PRIMARY KEY,
+            password        TEXT,
+            client_id       TEXT,
+            refresh_token   TEXT,
+            status          TEXT NOT NULL DEFAULT 'available',
+                            -- available / in_use / done / failed
+            imported_at     REAL,
+            claimed_at      REAL,
+            finished_at     REAL,
+            fail_reason     TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_outlook_status ON outlook_accounts(status);
+
+        CREATE TABLE IF NOT EXISTS registered (
+            email           TEXT PRIMARY KEY,
+            password        TEXT,
+            access_token    TEXT,
+            session_token   TEXT,
+            refresh_token   TEXT,
+            id_token        TEXT,
+            device_id       TEXT,
+            csrf_token      TEXT,
+            cookie_header   TEXT,
+            extra_json      TEXT,
+            created_at      REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS runs (
+            run_id          TEXT PRIMARY KEY,
+            email           TEXT,
+            status          TEXT,        -- running / done / failed
+            started_at      REAL,
+            finished_at     REAL,
+            log_path        TEXT,
+            error           TEXT
+        );
+    """)
+    con.commit()
+
+
+# ──────────────────────── outlook 号池 ────────────────────────
+
+
+def parse_lines(text: str) -> list[dict]:
+    """解析 4 段格式（每行一个）。无效行跳过。"""
+    out: list[dict] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("----")
+        if len(parts) != 4:
+            continue
+        email, password, client_id, refresh = (p.strip() for p in parts)
+        if "@" not in email or len(refresh) < 20:
+            continue
+        out.append({
+            "email": email.lower(),
+            "password": password,
+            "client_id": client_id,
+            "refresh_token": refresh,
+        })
+    return out
+
+
+def import_accounts(text: str) -> dict:
+    """批量入库。已存在的 email 仅在 refresh_token 不同时更新。"""
+    rows = parse_lines(text)
+    now = time.time()
+    inserted = updated = skipped = 0
+    with _lock:
+        con = _conn()
+        for r in rows:
+            cur = con.execute(
+                "SELECT refresh_token FROM outlook_accounts WHERE email=?",
+                (r["email"],),
+            )
+            existing = cur.fetchone()
+            if existing is None:
+                con.execute(
+                    "INSERT INTO outlook_accounts(email, password, client_id, refresh_token, "
+                    "status, imported_at) VALUES (?, ?, ?, ?, 'available', ?)",
+                    (r["email"], r["password"], r["client_id"], r["refresh_token"], now),
+                )
+                inserted += 1
+            elif existing["refresh_token"] != r["refresh_token"]:
+                con.execute(
+                    "UPDATE outlook_accounts SET refresh_token=?, password=?, client_id=?, "
+                    "status='available', imported_at=?, fail_reason=NULL WHERE email=?",
+                    (r["refresh_token"], r["password"], r["client_id"], now, r["email"]),
+                )
+                updated += 1
+            else:
+                skipped += 1
+        con.commit()
+    return {"parsed": len(rows), "inserted": inserted, "updated": updated, "skipped": skipped}
+
+
+def list_accounts(status: str = "", limit: int = 500) -> list[dict]:
+    con = _conn()
+    if status:
+        cur = con.execute(
+            "SELECT * FROM outlook_accounts WHERE status=? ORDER BY imported_at DESC LIMIT ?",
+            (status, limit),
+        )
+    else:
+        cur = con.execute(
+            "SELECT * FROM outlook_accounts ORDER BY imported_at DESC LIMIT ?",
+            (limit,),
+        )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def get_account(email: str) -> Optional[dict]:
+    con = _conn()
+    cur = con.execute("SELECT * FROM outlook_accounts WHERE email=?", (email.lower(),))
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def claim_account(email: str) -> Optional[dict]:
+    """原子 claim 指定邮箱（available / failed -> in_use）。
+
+    failed 也允许重试 claim：之前 OpenAI 风控误判 / 网络抖动等导致 fail 的号
+    应允许用户手动重试，已 done 的号才禁止重 claim（防误覆盖凭证）。
+    """
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    with _lock:
+        con = _conn()
+        cur = con.execute(
+            "SELECT * FROM outlook_accounts WHERE email=? AND status IN ('available', 'failed')",
+            (email,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        rc = con.execute(
+            "UPDATE outlook_accounts SET status='in_use', claimed_at=?, fail_reason=NULL "
+            "WHERE email=? AND status IN ('available', 'failed')",
+            (time.time(), email),
+        )
+        con.commit()
+        if rc.rowcount != 1:
+            return None
+        return dict(row)
+
+
+def claim_next() -> Optional[dict]:
+    """原子 claim 任一 available 号。"""
+    with _lock:
+        con = _conn()
+        cur = con.execute(
+            "SELECT * FROM outlook_accounts WHERE status='available' "
+            "ORDER BY imported_at ASC LIMIT 1"
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        rc = con.execute(
+            "UPDATE outlook_accounts SET status='in_use', claimed_at=? "
+            "WHERE email=? AND status='available'",
+            (time.time(), row["email"]),
+        )
+        con.commit()
+        if rc.rowcount != 1:
+            return claim_next()
+        return dict(row)
+
+
+def mark_done(email: str) -> None:
+    with _lock:
+        con = _conn()
+        con.execute(
+            "UPDATE outlook_accounts SET status='done', finished_at=?, fail_reason=NULL WHERE email=?",
+            (time.time(), email.lower()),
+        )
+        con.commit()
+
+
+def mark_failed(email: str, reason: str = "") -> None:
+    with _lock:
+        con = _conn()
+        con.execute(
+            "UPDATE outlook_accounts SET status='failed', finished_at=?, fail_reason=? WHERE email=?",
+            (time.time(), (reason or "")[:500], email.lower()),
+        )
+        con.commit()
+
+
+def release_unused(email: str) -> None:
+    """claim 后没真注册（异常 / 用户取消）→ 还回 available。"""
+    with _lock:
+        con = _conn()
+        con.execute(
+            "UPDATE outlook_accounts SET status='available', claimed_at=NULL "
+            "WHERE email=? AND status='in_use'",
+            (email.lower(),),
+        )
+        con.commit()
+
+
+def delete_account(email: str) -> bool:
+    with _lock:
+        con = _conn()
+        rc = con.execute("DELETE FROM outlook_accounts WHERE email=?", (email.lower(),))
+        con.commit()
+        return rc.rowcount > 0
+
+
+def stats() -> dict:
+    con = _conn()
+    cur = con.execute(
+        "SELECT status, COUNT(*) AS n FROM outlook_accounts GROUP BY status"
+    )
+    out = {"available": 0, "in_use": 0, "done": 0, "failed": 0, "total": 0}
+    for r in cur.fetchall():
+        out[r["status"]] = r["n"]
+        out["total"] += r["n"]
+    return out
+
+
+# ──────────────────────── 注册结果存储 ────────────────────────
+
+
+def save_registered(d: dict) -> None:
+    """保存注册成功（或部分成功）的凭证。覆盖同邮箱旧记录。
+
+    凭证三件套（access_token / session_token / refresh_token）单独存列；
+    其余字段（如 device_id / cookie_header / id_token / 自定义元数据）打包进 extra_json。
+    """
+    email = (d.get("email") or "").lower()
+    if not email:
+        return
+    extra = {k: v for k, v in d.items() if k not in {
+        "email", "password", "access_token", "session_token", "refresh_token",
+        "id_token", "device_id", "csrf_token", "cookie_header",
+    }}
+    with _lock:
+        con = _conn()
+        con.execute(
+            "INSERT OR REPLACE INTO registered "
+            "(email, password, access_token, session_token, refresh_token, "
+            "id_token, device_id, csrf_token, cookie_header, extra_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                email,
+                d.get("password", ""),
+                d.get("access_token", ""),
+                d.get("session_token", ""),
+                d.get("refresh_token", ""),
+                d.get("id_token", ""),
+                d.get("device_id", ""),
+                d.get("csrf_token", ""),
+                d.get("cookie_header", ""),
+                json.dumps(extra, ensure_ascii=False) if extra else None,
+                time.time(),
+            ),
+        )
+        con.commit()
+
+
+def list_registered(limit: int = 500) -> list[dict]:
+    con = _conn()
+    cur = con.execute(
+        "SELECT email, password, "
+        "length(access_token) AS at_len, length(session_token) AS st_len, "
+        "length(refresh_token) AS rt_len, created_at FROM registered "
+        "ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def get_registered(email: str) -> Optional[dict]:
+    con = _conn()
+    cur = con.execute("SELECT * FROM registered WHERE email=?", (email.lower(),))
+    row = cur.fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    if out.get("extra_json"):
+        try:
+            out["extra"] = json.loads(out["extra_json"])
+        except Exception:
+            out["extra"] = {}
+    out.pop("extra_json", None)
+    return out
+
+
+# ──────────────────────── 运行记录 ────────────────────────
+
+
+def create_run(run_id: str, email: str, log_path: str) -> None:
+    with _lock:
+        con = _conn()
+        con.execute(
+            "INSERT INTO runs(run_id, email, status, started_at, log_path) "
+            "VALUES (?, ?, 'running', ?, ?)",
+            (run_id, email.lower(), time.time(), log_path),
+        )
+        con.commit()
+
+
+def finish_run(run_id: str, status: str, error: str = "") -> None:
+    with _lock:
+        con = _conn()
+        con.execute(
+            "UPDATE runs SET status=?, finished_at=?, error=? WHERE run_id=?",
+            (status, time.time(), (error or "")[:500], run_id),
+        )
+        con.commit()
+
+
+def list_runs(limit: int = 50) -> list[dict]:
+    con = _conn()
+    cur = con.execute(
+        "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+# 模块加载时自动建表
+init_db()
