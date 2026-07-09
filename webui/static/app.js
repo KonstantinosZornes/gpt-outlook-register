@@ -847,6 +847,7 @@ const PERSIST_FIELDS = {
   autoProxyPool:     "text",
   autoRotateProxy:   "check",
   rotateProxyEvery:  "text",
+  proxyMaxUses:      "text",
 };
 
 function _saveForm() {
@@ -891,6 +892,7 @@ async function loadProxyConfig() {
     $("#autoRotateProxy").checked = config.auto_rotate_proxy === "1";
     $("#rotateProxyEvery").value = config.rotate_proxy_every || "5";
     $("#proxyMaxUses").value = config.proxy_max_uses || "10";
+    $("#regRandomProxyFromPool").checked = config.random_proxy_from_pool === "1";
     _saveForm();
   } catch (e) {
     console.error("loadProxyConfig:", e);
@@ -910,6 +912,7 @@ $("#btnSaveProxyCfg").addEventListener("click", async () => {
         auto_rotate_proxy: $("#autoRotateProxy").checked,
         rotate_proxy_every: parseInt($("#rotateProxyEvery").value || "5", 10) || 5,
         proxy_max_uses: parseInt($("#proxyMaxUses").value || "10", 10) || 10,
+        random_proxy_from_pool: $("#regRandomProxyFromPool").checked,
       }),
     });
     resultEl.textContent = "✅ 已保存";

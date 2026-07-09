@@ -672,6 +672,7 @@ class ProxyConfigReq(BaseModel):
     auto_rotate_proxy: Optional[bool] = None
     rotate_proxy_every: Optional[int] = None
     proxy_max_uses: Optional[int] = None
+    random_proxy_from_pool: Optional[bool] = None
 
 
 @app.get("/api/settings/proxy")

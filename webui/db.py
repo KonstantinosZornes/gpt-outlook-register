@@ -630,13 +630,14 @@ def get_oep_api_key() -> str:
 
 
 def get_proxy_config() -> dict:
-    """返回代理配置（含代理池 + 轮换设置 + 使用上限）。"""
+    """返回代理配置（含代理池 + 轮换设置 + 使用上限 + 单注册随机选池）。"""
     return {
         "proxy":             get_setting("proxy", ""),
         "proxy_pool":        get_setting("proxy_pool", ""),
         "auto_rotate_proxy": get_setting("auto_rotate_proxy", "1"),
         "rotate_proxy_every": get_setting("rotate_proxy_every", "5"),
         "proxy_max_uses":    get_setting("proxy_max_uses", str(DEFAULT_PROXY_MAX_USES)),
+        "random_proxy_from_pool": get_setting("random_proxy_from_pool", "0"),
     }
 
 
@@ -652,6 +653,8 @@ def save_proxy_config(data: dict) -> None:
         set_setting("rotate_proxy_every", str(int(data.get("rotate_proxy_every", 5))))
     if "proxy_max_uses" in data:
         set_setting("proxy_max_uses", str(max(1, int(data.get("proxy_max_uses", DEFAULT_PROXY_MAX_USES)))))
+    if "random_proxy_from_pool" in data:
+        set_setting("random_proxy_from_pool", "1" if data["random_proxy_from_pool"] else "0")
 
 
 # ──────────────────────── 代理使用统计 ────────────────────────
