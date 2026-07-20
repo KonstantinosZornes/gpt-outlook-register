@@ -222,16 +222,18 @@ def _make_sms_candidate(activation_id: str, source: str, code) -> Optional[dict]
 
 
 class SmsBowerProvider(BaseSmsProvider):
-    """SmsBower (smsbower.page) —— 支持号码复用 + resend + V2 API。"""
+    """sms-activate 协议系 provider（SmsBower / HeroSMS 共用）。"""
 
     provider_name = "smsbower"
-    BASE_URL = "https://smsbower.page/stubs/handler_api.php"
+    DEFAULT_BASE_URL = "https://smsbower.page/stubs/handler_api.php"
+    BASE_URL = DEFAULT_BASE_URL
     auto_report_success_on_code = False  # 等业务侧确认才报成功（便于号码复用）
 
     def __init__(
         self,
         api_key: str,
         *,
+        base_url: str = "",
         default_service: str = SMS_DEFAULT_SERVICE,
         default_country: str = SMS_DEFAULT_COUNTRY,
         max_price: float = -1,
@@ -240,6 +242,7 @@ class SmsBowerProvider(BaseSmsProvider):
         phone_success_max: int = 3,
     ):
         self.api_key = str(api_key or "").strip()
+        self.base_url = str(base_url or "").strip() or self.DEFAULT_BASE_URL
         self.default_service = str(default_service or SMS_DEFAULT_SERVICE).strip()
         self.default_country = str(default_country or SMS_DEFAULT_COUNTRY).strip()
         self.max_price = float(max_price or -1)
@@ -257,7 +260,7 @@ class SmsBowerProvider(BaseSmsProvider):
         payload = dict(params)
         if needs_key:
             payload["api_key"] = self.api_key
-        resp = requests.get(self.BASE_URL, params=payload, timeout=timeout, proxies=self._proxies)
+        resp = requests.get(self.base_url, params=payload, timeout=timeout, proxies=self._proxies)
         resp.raise_for_status()
         return resp
 
@@ -742,7 +745,7 @@ class SmsBowerProvider(BaseSmsProvider):
         """不走 raise_for_status 的原始请求，用于 cancel/debug 时拿到真实响应。"""
         payload = dict(params)
         payload["api_key"] = self.api_key
-        return requests.get(self.BASE_URL, params=payload, timeout=30, proxies=self._proxies)
+        return requests.get(self.base_url, params=payload, timeout=30, proxies=self._proxies)
 
     def cancel(self, activation_id: str) -> bool:
         activation_id = str(activation_id)
@@ -762,7 +765,7 @@ class SmsBowerProvider(BaseSmsProvider):
         # 1.5) EARLY_CANCEL_DENIED：号还没到最小激活时长，丢后台队列等够再重试，不阻塞主流程
         if not ok and self._is_early_cancel_denied(last_status, last_text):
             _enqueue_bg_cancel(
-                api_key=self.api_key, base_url=self.BASE_URL, proxies=self._proxies,
+                api_key=self.api_key, base_url=self.base_url, proxies=self._proxies,
                 activation_id=activation_id, provider_name=self.provider_name,
             )
             logger.info("%s ⏳ 号未到最小激活时长，已转入后台取消队列 (id=%s, 满 120s 后取消)",
@@ -886,7 +889,8 @@ class HeroSmsProvider(SmsBowerProvider):
     """
 
     provider_name = "herosms"
-    BASE_URL = "https://hero-sms.com/stubs/handler_api.php"
+    DEFAULT_BASE_URL = "https://hero-sms.com/stubs/handler_api.php"
+    BASE_URL = DEFAULT_BASE_URL
 
 
 # ---------------------------------------------------------------------------
@@ -1012,7 +1016,7 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
     # 也允许调用方显式传 sms_proxy 覆盖（保留扩展点，目前 WebUI 不暴露）。
     proxy = (str(config.get("sms_proxy") or config.get("proxy") or "")).strip() or None
     max_price = _safe_float(config.get("sms_max_price"), -1)
-    reuse = _safe_bool(config.get("sms_reuse_phone"), True)
+    reuse = _safe_bool(config.get("sms_reuse_phone"), False)
     succ_max = max(0, _safe_int(config.get("sms_phone_success_max"), 3))
 
     common_kwargs = dict(

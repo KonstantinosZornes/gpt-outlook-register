@@ -427,23 +427,32 @@ $("#poolTable").addEventListener("click", async (e) => {
   }
 });
 
-// ──────────────────────── 注册结果列表 ────────────────────────
+// ──────────────────────── 注册结果列表（分页） ────────────────────────
 
-async function refreshRegistered() {
-  const { items } = await api("/api/registered");
+const REG_PAGE_SIZE = 20;
+let _regPage = 1;
+let _regTotal = 0;
+
+function _regTotalPages() { return Math.max(1, Math.ceil(_regTotal / REG_PAGE_SIZE)); }
+
+function _updateRegPagination() {
+  const pages = _regTotalPages();
+  $("#regPageInfo").textContent = `第 ${_regPage} 页 / 共 ${pages} 页（${_regTotal} 条）`;
+  $("#regPrevPage").disabled = _regPage <= 1;
+  $("#regNextPage").disabled = _regPage >= pages;
+}
+
+async function refreshRegistered(resetPage) {
+  if (resetPage === true) _regPage = 1;
   const filter = document.querySelector("input[name='regFilter']:checked")?.value || "all";
-
-  // 按筛选条件过滤
-  let filtered = items;
-  if (filter === "has_rt") {
-    filtered = items.filter(r => r.rt_len > 0);
-  } else if (filter === "no_rt") {
-    filtered = items.filter(r => r.rt_len === 0);
-  }
+  const offset = (_regPage - 1) * REG_PAGE_SIZE;
+  const { items, total } = await api(`/api/registered?limit=${REG_PAGE_SIZE}&offset=${offset}&filter=${filter}`);
+  _regTotal = total;
+  if (_regPage > _regTotalPages()) _regPage = _regTotalPages();
 
   const tb = $("#regTable tbody");
   tb.innerHTML = "";
-  for (const r of filtered) {
+  for (const r of items) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><input type="checkbox" class="reg-check" data-email="${r.email}"></td>
@@ -461,12 +470,16 @@ async function refreshRegistered() {
   }
   $("#regSelectAll").checked = false;
   _updateSelCountReg();
+  _updateRegPagination();
 }
-$("#btnRefreshReg").addEventListener("click", refreshRegistered);
 
-// radio 切换时自动刷新
+$("#btnRefreshReg").addEventListener("click", () => refreshRegistered(false));
+$("#regPrevPage").addEventListener("click", () => { if (_regPage > 1) { _regPage--; refreshRegistered(); } });
+$("#regNextPage").addEventListener("click", () => { if (_regPage < _regTotalPages()) { _regPage++; refreshRegistered(); } });
+
+// radio 切换时重置到第一页
 document.querySelectorAll("input[name='regFilter']").forEach(r => {
-  r.addEventListener("change", refreshRegistered);
+  r.addEventListener("change", () => refreshRegistered(true));
 });
 
 // ── 注册结果：复选框 + 批量删 + 单行删 ──
@@ -538,7 +551,17 @@ async function _loadCred(email) {
 
 async function _copyText(text, btn) {
   try {
-    await navigator.clipboard.writeText(text);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;left:-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
     if (btn) {
       const orig = btn.textContent;
       const cls = btn.className;
@@ -1012,16 +1035,19 @@ $("#btnTestMail").addEventListener("click", async (e) => {
 
 // ──────────────────────── 📱 SMS 接码配置 ────────────────────────
 
-// 全量国家列表（id → name_cn + openai_sms_safe）；首次加载配置时从后端拿
+// 全量国家列表（id → name_cn + openai_sms_safe）；按 provider 动态加载
 let _smsAllCountries = [];
 let _smsSafeCountrySet = new Set();
+let _smsCountriesProvider = "";
 
-async function _loadSmsAllCountries() {
-  if (_smsAllCountries.length) return _smsAllCountries;
+async function _loadSmsAllCountries(provider) {
+  provider = provider || "smsbower";
+  if (_smsAllCountries.length && _smsCountriesProvider === provider) return _smsAllCountries;
   try {
-    const r = await api("/api/settings/sms/all_countries");
+    const r = await api(`/api/settings/sms/all_countries?provider=${encodeURIComponent(provider)}`);
     _smsAllCountries = r.countries || [];
     _smsSafeCountrySet = new Set(r.openai_sms_safe || []);
+    _smsCountriesProvider = provider;
   } catch (e) {
     console.error("加载国家列表失败:", e);
   }
@@ -1101,11 +1127,11 @@ function _updateSmsPerPhoneHint() {
 }
 
 async function loadSmsConfig() {
-  await _loadSmsAllCountries();
   try {
     const { config } = await api("/api/settings/sms");
-    $("#smsEnabled").checked = config.sms_enabled === "1";
     const provider = config.sms_provider || "smsbower";
+    await _loadSmsAllCountries(provider);
+    $("#smsEnabled").checked = config.sms_enabled === "1";
     const radio = document.querySelector(`input[name="smsProvider"][value="${provider}"]`);
     if (radio) radio.checked = true;
 
@@ -1150,6 +1176,20 @@ $("#btnInvertAllowedCountries")?.addEventListener("click", () => {
     cb.checked = !cb.checked;
   });
   _updateAllowedCountryCount();
+});
+
+// 切换接码平台时重新加载国家列表
+document.querySelectorAll("input[name='smsProvider']").forEach(radio => {
+  radio.addEventListener("change", async (e) => {
+    const newProvider = e.target.value;
+    _smsAllCountries = [];
+    _smsCountriesProvider = "";
+    const box = $("#smsAllowedCountriesBox");
+    if (box) box.innerHTML = '<em style="grid-column:1/-1;color:#aaa;font-size:12px">加载中...</em>';
+    await _loadSmsAllCountries(newProvider);
+    _renderSmsCountrySelect($("#smsCountry"), $("#smsCountry").value);
+    _renderSmsAllowedCountriesBox(_getAllowedCountriesValue());
+  });
 });
 
 $("#btnClearAllowedCountries")?.addEventListener("click", () => {

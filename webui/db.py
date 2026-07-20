@@ -421,14 +421,31 @@ def save_registered(d: dict) -> None:
         con.commit()
 
 
-def list_registered(limit: int = 500) -> list[dict]:
+def count_registered(filter_rt: str = "all") -> int:
     con = _conn()
+    if filter_rt == "has_rt":
+        cur = con.execute("SELECT COUNT(*) FROM registered WHERE length(refresh_token) > 0")
+    elif filter_rt == "no_rt":
+        cur = con.execute("SELECT COUNT(*) FROM registered WHERE coalesce(length(refresh_token),0) = 0")
+    else:
+        cur = con.execute("SELECT COUNT(*) FROM registered")
+    return cur.fetchone()[0]
+
+
+def list_registered(limit: int = 20, offset: int = 0, filter_rt: str = "all") -> list[dict]:
+    con = _conn()
+    if filter_rt == "has_rt":
+        where = "WHERE length(refresh_token) > 0"
+    elif filter_rt == "no_rt":
+        where = "WHERE coalesce(length(refresh_token),0) = 0"
+    else:
+        where = ""
     cur = con.execute(
-        "SELECT email, password, "
-        "length(access_token) AS at_len, length(session_token) AS st_len, "
-        "length(refresh_token) AS rt_len, created_at FROM registered "
-        "ORDER BY created_at DESC LIMIT ?",
-        (limit,),
+        f"SELECT email, password, "
+        f"length(access_token) AS at_len, length(session_token) AS st_len, "
+        f"length(refresh_token) AS rt_len, created_at FROM registered "
+        f"{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        (limit, offset),
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -771,7 +788,7 @@ def get_sms_config() -> dict:
         "sms_country":             get_setting("sms_country", "52"),
         "sms_service":             get_setting("sms_service", "dr"),
         "sms_max_price":           get_setting("sms_max_price", ""),
-        "sms_reuse_phone":         get_setting("sms_reuse_phone", "1"),
+        "sms_reuse_phone":         get_setting("sms_reuse_phone", "0"),
         "sms_phone_success_max":   get_setting("sms_phone_success_max", "3"),
         "sms_auto_country":        get_setting("sms_auto_country", "0"),
         "sms_keep_country":        get_setting("sms_keep_country", "0"),
@@ -834,7 +851,7 @@ def get_sms_internal_config() -> dict:
         "sms_country":             get_setting("sms_country", "52"),
         "sms_service":             get_setting("sms_service", "dr"),
         "sms_max_price":           get_setting("sms_max_price", ""),
-        "sms_reuse_phone":         get_setting("sms_reuse_phone", "1") in ("1", "true"),
+        "sms_reuse_phone":         get_setting("sms_reuse_phone", "0") in ("1", "true"),
         "sms_phone_success_max":   get_setting("sms_phone_success_max", "3"),
         "sms_auto_country":        get_setting("sms_auto_country", "0") in ("1", "true"),
         "sms_keep_country":        get_setting("sms_keep_country", "0") in ("1", "true"),

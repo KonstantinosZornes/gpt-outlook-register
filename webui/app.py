@@ -323,8 +323,10 @@ def api_runs(limit: int = 50):
 
 
 @app.get("/api/registered")
-def api_registered(limit: int = 500):
-    return {"ok": True, "items": db.list_registered(limit=limit)}
+def api_registered(limit: int = 20, offset: int = 0, filter: str = "all"):
+    items = db.list_registered(limit=limit, offset=offset, filter_rt=filter)
+    total = db.count_registered(filter_rt=filter)
+    return {"ok": True, "items": items, "total": total}
 
 
 @app.get("/api/registered/{email}")
@@ -553,24 +555,47 @@ def api_sms_top_countries():
 
 
 @app.get("/api/settings/sms/all_countries")
-def api_sms_all_countries():
-    """返回所有已知国家 ID + 中文名（用于下拉框 / 多选）。"""
+def api_sms_all_countries(provider: str = ""):
+    """返回当前平台实际有库存的国家（动态查询）；查询失败则 fallback 到静态字典。"""
     import sys as _sys
     ROOT_DIR = Path(__file__).resolve().parents[1]
     if str(ROOT_DIR) not in _sys.path:
         _sys.path.insert(0, str(ROOT_DIR))
-    from sms_provider import SMS_COUNTRY_NAMES_CN, OPENAI_SMS_COUNTRIES
-    # 按 ID 数值升序
+    from sms_provider import SMS_COUNTRY_NAMES_CN, OPENAI_SMS_COUNTRIES, create_sms_provider
+
+    cfg = db.get_sms_internal_config()
+    if provider:
+        cfg["sms_provider"] = provider
+
+    # 尝试从平台 API 动态获取有库存的国家
+    if cfg.get("sms_api_key"):
+        try:
+            p = create_sms_provider(cfg["sms_provider"], cfg)
+            rows = p.get_top_countries(service=cfg.get("sms_service") or "dr")
+            countries = []
+            for r in rows:
+                cid = str(r.get("country") or "")
+                countries.append({
+                    "id": cid,
+                    "name_cn": SMS_COUNTRY_NAMES_CN.get(cid, f"国家{cid}"),
+                    "openai_sms_safe": cid in OPENAI_SMS_COUNTRIES,
+                    "price": r.get("price"),
+                    "count": r.get("count"),
+                })
+            if countries:
+                return {"ok": True, "countries": countries,
+                        "openai_sms_safe": list(OPENAI_SMS_COUNTRIES), "source": "live"}
+        except Exception:
+            pass
+
+    # fallback: 静态字典
     items = sorted(SMS_COUNTRY_NAMES_CN.items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 9999)
     countries = [
-        {
-            "id": cid,
-            "name_cn": name,
-            "openai_sms_safe": cid in OPENAI_SMS_COUNTRIES,
-        }
+        {"id": cid, "name_cn": name, "openai_sms_safe": cid in OPENAI_SMS_COUNTRIES}
         for cid, name in items
     ]
-    return {"ok": True, "countries": countries, "openai_sms_safe": list(OPENAI_SMS_COUNTRIES)}
+    return {"ok": True, "countries": countries,
+            "openai_sms_safe": list(OPENAI_SMS_COUNTRIES), "source": "static"}
 
 
 # ──────────────────────── 自动导出 (CPA / SUB2API) ────────────────────────
