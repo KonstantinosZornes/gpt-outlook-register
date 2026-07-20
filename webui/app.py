@@ -485,6 +485,34 @@ def api_sms_stats():
     return {"ok": True, "items": items}
 
 
+@app.get("/api/sms_exhausted")
+def api_sms_exhausted():
+    """列出持久化的不可用国家。"""
+    from sms_provider import SMS_COUNTRY_NAMES_CN, list_exhausted_countries
+
+    # 确保内存缓存已加载（与 DB 对齐）
+    list_exhausted_countries()
+    items = []
+    for row in db.list_sms_exhausted_countries():
+        country = str(row.get("country") or "")
+        name = SMS_COUNTRY_NAMES_CN.get(country, "")
+        items.append({
+            **row,
+            "country_name": name,
+            "country_label": f"{country} {name}".strip(),
+        })
+    return {"ok": True, "items": items}
+
+
+@app.post("/api/sms_exhausted/clear")
+def api_sms_exhausted_clear(country: str = ""):
+    """清空不可用国家。query country 可选，空=全部。"""
+    from sms_provider import clear_exhausted_countries
+
+    n = clear_exhausted_countries((country or "").strip() or None)
+    return {"ok": True, "cleared": n, "country": (country or "").strip() or None}
+
+
 class SaveSmsConfigReq(BaseModel):
     sms_enabled: Optional[str] = None              # "0" / "1"
     sms_provider: Optional[str] = None             # smsbower / herosms
@@ -502,7 +530,7 @@ class SaveSmsConfigReq(BaseModel):
     sms_auto_min_stock: Optional[str] = None
     sms_auto_max_price: Optional[str] = None
     sms_max_phone_attempts: Optional[str] = None   # 空 = 用 provider 默认；>0 = 自定义
-    sms_max_country_attempts: Optional[str] = None # 空/0 = 不限；>0 = 单轮接码失败达限记不可用（跨账号，重启清空）
+    sms_max_country_attempts: Optional[str] = None # 空/0 = 不限；>0 = 单轮接码失败达限记不可用（持久化，可 WebUI 清空）
     sms_resend_interval: Optional[str] = None      # OpenAI resend 间隔秒数（默认 20）
     sms_resend_max: Optional[str] = None           # OpenAI resend 最多次数（默认 3）
     sms_min_balance: Optional[str] = None          # 短信供应商最低余额；低于则停止注册

@@ -382,7 +382,7 @@
             <label style="flex:1">最多换号次数 <small>（空 = 默认 8；自定义请填正整数）</small>
               <input id="smsMaxPhoneAttempts" placeholder="留空 = 默认 8" type="number" min="1" max="30">
             </label>
-            <label style="flex:1">单国最大接码失败 <small>（空/0 = 不限；单轮达限记不可用；跨账号，重启清空）</small>
+            <label style="flex:1">单国最大接码失败 <small>（空/0 = 不限；单轮达限记不可用；持久化可清空）</small>
               <input id="smsMaxCountryAttempts" placeholder="留空 = 不限制" type="number" min="0" max="30">
             </label>
             <label style="flex:1">resend 间隔秒数 <small>（默认 20；OpenAI 端重发 OTP 的间隔）</small>
@@ -396,8 +396,36 @@
             💡 单号等待窗口 = 间隔 × 次数 + 20s 缓冲
             （当前 <span id="smsPerPhoneHint">80</span>s）。
             失败时立刻 cancel 当前号 + 换新号继续，不浪费时间。
-            按接码失败累计（拒号/等码超时）；单轮达限记不可用（跨账号，重启清空）；本轮也会立刻换国。
+            按接码失败累计（拒号/等码超时）；单轮达限记不可用（持久化，可下方清空）；本轮也会立刻换国。
           </p>
+        </fieldset>
+
+        <fieldset>
+          <legend>不可用国家</legend>
+          <p class="hint" style="margin:0 0 8px;font-size:12px">
+            单轮接码失败达限后写入此处，跨重启保留。清空后重新参与选号。
+          </p>
+          <div class="row" style="margin-bottom:8px">
+            <button type="button" id="btnRefreshExhausted">🔄 刷新</button>
+            <button type="button" id="btnClearAllExhausted">🗑️ 清空全部</button>
+            <span id="exhaustedCount" style="font-size:12px;color:var(--pink-dark);margin-left:8px"></span>
+          </div>
+          <div style="max-height:180px;overflow:auto;border:1px solid var(--border,#e8d0d8);border-radius:8px">
+            <table id="exhaustedTable" style="width:100%;font-size:13px">
+              <thead>
+                <tr>
+                  <th>国家</th>
+                  <th>原因</th>
+                  <th>失败数</th>
+                  <th>时间</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td colspan="5">加载中...</td></tr>
+              </tbody>
+            </table>
+          </div>
         </fieldset>
 
         <fieldset>

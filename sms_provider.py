@@ -150,11 +150,69 @@ SMS_PHONE_LIFETIME = 20 * 60  # 号码租用窗口（秒）
 _SMS_CACHE_LOCK = threading.Lock()
 _SMS_VERIFY_LOCK = threading.RLock()
 _SMS_CACHE: Optional[dict] = None  # 跨线程共享的号码复用缓存
-# 单国不可用：进程内跨账号共享，重启清空。
+# 单国不可用：DB 持久化 + 内存缓存。
 # 仅当「单轮内」某国接码失败次数 ≥ sms_max_country_attempts 才写入。
 # 接码失败 = send 被拒 / 等码超时 / 未 report_success。
 _COUNTRY_EXHAUST_LOCK = threading.Lock()
 _EXHAUSTED_COUNTRIES: set[str] = set()
+_EXHAUSTED_LOADED = False
+
+
+def _load_exhausted_from_db() -> None:
+    """首次使用时从 DB 加载不可用国家到内存缓存。"""
+    global _EXHAUSTED_LOADED
+    with _COUNTRY_EXHAUST_LOCK:
+        if _EXHAUSTED_LOADED:
+            return
+        try:
+            from webui import db
+            rows = db.list_sms_exhausted_countries()
+            for r in rows:
+                cid = str(r.get("country") or "").strip()
+                if cid:
+                    _EXHAUSTED_COUNTRIES.add(cid)
+        except Exception as e:
+            logger.debug("load exhausted countries 失败: %s", e)
+        _EXHAUSTED_LOADED = True
+
+
+def _persist_exhausted_country(country: str, *, reason: str = "", fail_count: int = 0) -> None:
+    """写入内存 + DB。"""
+    cid = str(country or "").strip()
+    if not cid:
+        return
+    with _COUNTRY_EXHAUST_LOCK:
+        _EXHAUSTED_COUNTRIES.add(cid)
+    try:
+        from webui import db
+        db.add_sms_exhausted_country(cid, reason=reason, fail_count=fail_count)
+    except Exception as e:
+        logger.debug("persist exhausted country 失败: %s", e)
+
+
+def clear_exhausted_countries(country: Optional[str] = None) -> int:
+    """清空不可用国家（内存 + DB）。country 为空=全部。返回删除数。"""
+    global _EXHAUSTED_LOADED
+    try:
+        from webui import db
+        n = db.clear_sms_exhausted_countries(country)
+    except Exception as e:
+        logger.warning("clear exhausted countries 失败: %s", e)
+        n = 0
+    with _COUNTRY_EXHAUST_LOCK:
+        if country:
+            _EXHAUSTED_COUNTRIES.discard(str(country).strip())
+        else:
+            _EXHAUSTED_COUNTRIES.clear()
+        _EXHAUSTED_LOADED = True
+    return n
+
+
+def list_exhausted_countries() -> list[str]:
+    """当前不可用国家 ID 列表（含 DB 已加载）。"""
+    _load_exhausted_from_db()
+    with _COUNTRY_EXHAUST_LOCK:
+        return sorted(_EXHAUSTED_COUNTRIES)
 
 # OpenAI 走纯 SMS 的国家白名单（截至 2025-2026 实测；其它国家会抽到 WhatsApp 号）
 OPENAI_SMS_COUNTRIES = {"52"}  # Thailand only
@@ -1084,7 +1142,7 @@ class PhoneCallbackController:
         self._stat_recorded_activation_ids: set[str] = set()
 
     def _max_country_attempts(self) -> int:
-        """单轮内单国最大接码失败次数；0 = 不限制。达限后该国计入进程级不可用（重启清空）。"""
+        """单轮内单国最大接码失败次数；0 = 不限制。达限后该国计入持久化不可用。"""
         raw = str(self.config.get("sms_max_country_attempts") or "").strip()
         if not raw:
             return 0
@@ -1098,7 +1156,7 @@ class PhoneCallbackController:
 
     def _note_sms_failed(self) -> None:
         """记一次接码失败（send 拒 / 等码超时 / 未 report_success）。
-        同 activation 只计一次；达限写入进程级不可用。"""
+        同 activation 只计一次；达限写入持久化不可用。"""
         if not self.activation or self.completed:
             return
         aid = str(self.activation.activation_id or "")
@@ -1118,20 +1176,21 @@ class PhoneCallbackController:
             return
         name = SMS_COUNTRY_NAMES_CN.get(country, "?")
         if n >= limit:
-            with _COUNTRY_EXHAUST_LOCK:
-                _EXHAUSTED_COUNTRIES.add(country)
+            reason = f"本轮接码失败 {n}/{limit}"
+            _persist_exhausted_country(country, reason=reason, fail_count=n)
             self.log(
                 f"🔁 本轮 {country}({name}) 接码失败 {n}/{limit} 达上限，"
-                f"计入不可用国家（跨账号，重启清空）"
+                f"计入不可用国家（已持久化，可在 WebUI 清空）"
             )
         else:
             self.log(f"  本轮 {country}({name}) 接码失败 {n}/{limit}")
 
     def _exhausted_countries(self) -> set[str]:
-        """进程级不可用 + 本轮接码失败已达上限的国家。limit=0 时不排除。"""
+        """持久化不可用 + 本轮接码失败已达上限的国家。limit=0 时不排除。"""
         limit = self._max_country_attempts()
         if limit <= 0:
             return set()
+        _load_exhausted_from_db()
         with _COUNTRY_EXHAUST_LOCK:
             exhausted = set(_EXHAUSTED_COUNTRIES)
         exhausted |= {
@@ -1146,6 +1205,7 @@ class PhoneCallbackController:
             return list(candidates)
         kept = [c for c in candidates if str(c) not in exhausted]
         if kept:
+            _load_exhausted_from_db()
             with _COUNTRY_EXHAUST_LOCK:
                 process_set = set(_EXHAUSTED_COUNTRIES)
             parts = []
@@ -1202,10 +1262,11 @@ class PhoneCallbackController:
         if self.keep_country and self._last_country:
             if self._last_country in exhausted:
                 limit = self._max_country_attempts()
+                _load_exhausted_from_db()
                 with _COUNTRY_EXHAUST_LOCK:
                     proc = self._last_country in _EXHAUSTED_COUNTRIES
                 why = (
-                    "进程不可用"
+                    "已标记不可用"
                     if proc
                     else f"本轮接码失败{self._session_fail_count(self._last_country)}/{limit}"
                 )

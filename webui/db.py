@@ -89,6 +89,13 @@ def init_db():
             updated_at      REAL,
             PRIMARY KEY (provider, country)
         );
+
+        CREATE TABLE IF NOT EXISTS sms_exhausted_countries (
+            country         TEXT PRIMARY KEY,
+            reason          TEXT,
+            fail_count      INTEGER NOT NULL DEFAULT 0,
+            created_at      REAL
+        );
     """)
     con.commit()
     # 老 DB migrate：error_category 在后期才加，对已建表补列
@@ -832,6 +839,68 @@ def record_sms_stat(provider: str, country: str, success: bool) -> None:
             (provider, country, 1 if success else 0, 0 if success else 1, time.time()),
         )
         con.commit()
+
+
+def add_sms_exhausted_country(
+    country: str,
+    *,
+    reason: str = "",
+    fail_count: int = 0,
+) -> None:
+    """标记国家为不可用（单轮接码失败达限）。已存在则更新 reason/fail_count。"""
+    country = str(country or "").strip()
+    if not country:
+        return
+    with _lock:
+        con = _conn()
+        con.execute(
+            """
+            INSERT INTO sms_exhausted_countries(country, reason, fail_count, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(country) DO UPDATE SET
+                reason = excluded.reason,
+                fail_count = excluded.fail_count
+            """,
+            (country, (reason or "")[:500], int(fail_count or 0), time.time()),
+        )
+        con.commit()
+
+
+def list_sms_exhausted_countries() -> list[dict]:
+    """返回已标记不可用的国家列表。"""
+    con = _conn()
+    rows = con.execute(
+        """
+        SELECT country, reason, fail_count, created_at
+        FROM sms_exhausted_countries
+        ORDER BY created_at DESC, country ASC
+        """
+    ).fetchall()
+    return [
+        {
+            "country": r["country"],
+            "reason": r["reason"] or "",
+            "fail_count": int(r["fail_count"] or 0),
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
+
+
+def clear_sms_exhausted_countries(country: Optional[str] = None) -> int:
+    """清空不可用国家。country 为空=全部；指定则只删一国。返回删除行数。"""
+    with _lock:
+        con = _conn()
+        cid = str(country or "").strip()
+        if cid:
+            rc = con.execute(
+                "DELETE FROM sms_exhausted_countries WHERE country=?",
+                (cid,),
+            )
+        else:
+            rc = con.execute("DELETE FROM sms_exhausted_countries")
+        con.commit()
+        return int(rc.rowcount or 0)
 
 
 def list_sms_stats() -> list[dict]:

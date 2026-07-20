@@ -251,10 +251,68 @@ $$(".tab").forEach((t) => {
     if (t.dataset.tab === "registered") refreshRegistered();
     if (t.dataset.tab === "runs") refreshRuns();
     if (t.dataset.tab === "mailcfg") loadMailConfig();
-    if (t.dataset.tab === "smscfg") loadSmsConfig();
+    if (t.dataset.tab === "smscfg") {
+      loadSmsConfig();
+      refreshExhaustedCountries();
+    }
     if (t.dataset.tab === "exportcfg") loadExportConfig();
     if (t.dataset.tab === "smsstats") refreshSmsStats();
   });
+});
+
+async function refreshExhaustedCountries() {
+  const tb = $("#exhaustedTable tbody");
+  const countEl = $("#exhaustedCount");
+  if (!tb) return;
+  tb.innerHTML = `<tr><td colspan="5">加载中...</td></tr>`;
+  try {
+    const { items } = await api("/api/sms_exhausted");
+    tb.innerHTML = "";
+    if (countEl) countEl.textContent = items.length ? `${items.length} 个` : "无";
+    if (!items.length) {
+      tb.innerHTML = `<tr><td colspan="5">暂无不可用国家</td></tr>`;
+      return;
+    }
+    for (const r of items) {
+      const tr = document.createElement("tr");
+      const cid = String(r.country || "");
+      tr.innerHTML = `
+        <td>${escapeHtml(r.country_label || cid || "-")}</td>
+        <td>${escapeHtml(r.reason || "-")}</td>
+        <td>${Number(r.fail_count || 0)}</td>
+        <td>${fmtTime(r.created_at)}</td>
+        <td><button type="button" class="btn-clear-one-exhausted" data-country="${escapeHtml(cid)}">清除</button></td>
+      `;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll(".btn-clear-one-exhausted").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const c = btn.dataset.country || "";
+        if (!c) return;
+        try {
+          await api(`/api/sms_exhausted/clear?country=${encodeURIComponent(c)}`, { method: "POST" });
+          refreshExhaustedCountries();
+        } catch (e) {
+          alert("清除失败: " + e.message);
+        }
+      });
+    });
+  } catch (e) {
+    tb.innerHTML = `<tr><td colspan="5">加载失败：${escapeHtml(e.message)}</td></tr>`;
+    if (countEl) countEl.textContent = "";
+  }
+}
+
+$("#btnRefreshExhausted")?.addEventListener("click", refreshExhaustedCountries);
+$("#btnClearAllExhausted")?.addEventListener("click", async () => {
+  if (!confirm("清空全部不可用国家？")) return;
+  try {
+    const r = await api("/api/sms_exhausted/clear", { method: "POST" });
+    alert(`已清空 ${r.cleared || 0} 个`);
+    refreshExhaustedCountries();
+  } catch (e) {
+    alert("清空失败: " + e.message);
+  }
 });
 
 async function refreshSmsStats() {
