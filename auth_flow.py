@@ -2226,6 +2226,56 @@ class AuthFlow:
             return ""
         return ""
 
+    def _session_get_with_retry(
+        self,
+        url: str,
+        *,
+        headers: dict | None = None,
+        timeout: int = 30,
+        allow_redirects: bool = False,
+        retries: int = 3,
+        label: str = "http_get",
+    ):
+        """对瞬时网络错误做有限次同 URL 重试（代理断连 / curl 55 等）。"""
+        last_err: Exception | None = None
+        for attempt in range(1, max(1, retries) + 1):
+            try:
+                return self.session.get(
+                    url,
+                    headers=headers,
+                    timeout=timeout,
+                    allow_redirects=allow_redirects,
+                )
+            except Exception as e:
+                last_err = e
+                msg = str(e).lower()
+                transient = (
+                    "connection closed" in msg
+                    or "connection reset" in msg
+                    or "timed out" in msg
+                    or "timeout" in msg
+                    or "failed to perform" in msg
+                    or "curl: (55)" in msg
+                    or "curl: (56)" in msg
+                    or "curl: (28)" in msg
+                    or "curl: (7)" in msg
+                    or e.__class__.__name__ in (
+                        "ConnectionError",
+                        "Timeout",
+                        "TimeoutError",
+                        "CurlError",
+                    )
+                )
+                if (not transient) or attempt >= retries:
+                    raise
+                sleep_s = min(2.0 * attempt, 6.0)
+                logger.warning(
+                    "[%s] 瞬时网络错误，重试 %s/%s (sleep=%.1fs): %s",
+                    label, attempt, retries, sleep_s, e,
+                )
+                time.sleep(sleep_s)
+        raise last_err  # pragma: no cover
+
     # ── Step 10: 跟踪重定向链 ──
     def follow_redirect_chain(self, start_url: str) -> tuple[str, str]:
         """手动跟踪重定向，返回 (callback_url, final_url)"""
@@ -2240,8 +2290,13 @@ class AuthFlow:
                 "Referer": "https://chatgpt.com/",
                 "User-Agent": self._common_headers()["User-Agent"],
             }
-            resp = self.session.get(
-                current_url, headers=headers, timeout=30, allow_redirects=False
+            resp = self._session_get_with_retry(
+                current_url,
+                headers=headers,
+                timeout=30,
+                allow_redirects=False,
+                retries=3,
+                label=f"redirect_hop_{i+1}",
             )
             self._trace_http(f"redirect_hop_{i+1}", resp)
 
@@ -2282,11 +2337,17 @@ class AuthFlow:
 
         # 补一跳首页
         if (not callback_url) and (not current_url.rstrip("/").endswith("chatgpt.com")):
-            self.session.get(
-                "https://chatgpt.com/",
-                headers={"Referer": current_url},
-                timeout=30,
-            )
+            try:
+                self._session_get_with_retry(
+                    "https://chatgpt.com/",
+                    headers={"Referer": current_url},
+                    timeout=30,
+                    allow_redirects=True,
+                    retries=2,
+                    label="redirect_home",
+                )
+            except Exception as e:
+                logger.warning("补一跳首页失败（忽略）: %s", e)
 
         logger.info(f"重定向链完成, callback: {'有' if callback_url else '无'}")
         return callback_url, current_url
