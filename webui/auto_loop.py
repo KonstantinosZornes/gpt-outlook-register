@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Optional
 
-from proxy_utils import mask_proxy_url, parse_proxy_pool
+from proxy_utils import mask_proxy_url, parse_proxy_pool, proxy_usage_key
 
 from . import db, registrar
 
@@ -236,10 +236,13 @@ class AutoLoopController:
         - 启用轮换：每跑 `rotate_proxy_every` 个账号，全局切换到下一条可用代理
         """
         # 单代理模式
+        def _available(p: str) -> bool:
+            return db.is_proxy_available(proxy_usage_key(p) or p)
+
         if not self._proxy_pool:
             proxy = self._options.get("proxy", "") or ""
             if proxy:
-                if not db.is_proxy_available(proxy):
+                if not _available(proxy):
                     raise RuntimeError(f"代理 {mask_proxy_url(proxy)} 已达到使用上限")
                 logger.info(
                     f"[auto-loop] worker-{worker_id} 使用单代理: {mask_proxy_url(proxy)}"
@@ -251,7 +254,7 @@ class AutoLoopController:
             for i in range(len(self._proxy_pool)):
                 idx = (worker_id + self._proxy_start_offset + i) % len(self._proxy_pool)
                 proxy = self._proxy_pool[idx]
-                if db.is_proxy_available(proxy):
+                if _available(proxy):
                     logger.info(
                         f"[auto-loop] worker-{worker_id} 固定代理: {mask_proxy_url(proxy)} "
                         f"(池索引={idx}, 偏移={self._proxy_start_offset})"
@@ -265,7 +268,7 @@ class AutoLoopController:
             need_rotate = (
                 self._accounts_started % self._proxy_rotation_interval == 0
                 or not self._current_batch_proxy
-                or not db.is_proxy_available(self._current_batch_proxy)
+                or not _available(self._current_batch_proxy)
             )
             if need_rotate:
                 found = False
@@ -273,7 +276,7 @@ class AutoLoopController:
                     idx = self._proxy_rr_index % len(self._proxy_pool)
                     proxy = self._proxy_pool[idx]
                     self._proxy_rr_index += 1
-                    if db.is_proxy_available(proxy):
+                    if _available(proxy):
                         self._current_batch_proxy = proxy
                         found = True
                         break

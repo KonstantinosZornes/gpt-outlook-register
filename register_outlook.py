@@ -60,8 +60,11 @@ def main():
         f"账号: {email}  client_id={client_id[:8]}…  refresh_token len={len(refresh)}"
     )
 
+    from proxy_utils import ensure_sticky_proxy  # noqa: E402
+
     cfg = Config()
-    cfg.proxy = os.environ.get("PROXY") or None
+    # DataImpulse：单次注册注入 sessid，全程同 IP
+    cfg.proxy = ensure_sticky_proxy(os.environ.get("PROXY") or None) or None
 
     mail = OutlookMailProvider(
         email=email, password=password,

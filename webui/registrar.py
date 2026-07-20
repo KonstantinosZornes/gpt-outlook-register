@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 from config import Config  # noqa: E402
 from mail_outlook import OutlookMailProvider  # noqa: E402
 from auth_flow import AuthFlow  # noqa: E402
-from proxy_utils import mask_proxy_url  # noqa: E402
+from proxy_utils import ensure_sticky_proxy, mask_proxy_url, proxy_usage_key  # noqa: E402
 from sms_provider import PhoneCallbackController, create_sms_provider  # noqa: E402
 
 from . import db  # noqa: E402
@@ -168,16 +168,19 @@ def _do_register(
             os.environ[k] = v
 
         cfg = Config()
-        cfg.proxy = (options.get("proxy") or "").strip() or None
+        raw_proxy = (options.get("proxy") or "").strip() or None
+        # DataImpulse 等住宅网关：每次注册注入唯一 sessid，全程 sticky，防 mid-run 换 IP → invalid_state
+        cfg.proxy = ensure_sticky_proxy(raw_proxy, session_id=run_id.replace("-", "")[:12]) if raw_proxy else None
 
-        # ─ 代理使用统计 + 上限检查 ─
+        # ─ 代理使用统计 + 上限检查（按去掉 sessid 的基址计，避免 sticky 每次都算新代理） ─
         if cfg.proxy:
-            usage = db.get_proxy_usage(cfg.proxy)
+            usage_key = proxy_usage_key(cfg.proxy) or cfg.proxy
+            usage = db.get_proxy_usage(usage_key)
             if usage["used_count"] >= usage["max_uses"]:
                 raise RuntimeError(
-                    f"代理 {mask_proxy_url(cfg.proxy)} 已达到使用上限 ({usage['used_count']}/{usage['max_uses']})"
+                    f"代理 {mask_proxy_url(usage_key)} 已达到使用上限 ({usage['used_count']}/{usage['max_uses']})"
                 )
-            db.record_proxy_usage(cfg.proxy)
+            db.record_proxy_usage(usage_key)
             logging.getLogger("registrar").info(
                 f"[register] 代理 {mask_proxy_url(cfg.proxy)} 已使用 {usage['used_count'] + 1}/{usage['max_uses']} 次"
             )
