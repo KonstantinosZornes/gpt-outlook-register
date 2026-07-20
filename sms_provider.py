@@ -150,6 +150,9 @@ SMS_PHONE_LIFETIME = 20 * 60  # 号码租用窗口（秒）
 _SMS_CACHE_LOCK = threading.Lock()
 _SMS_VERIFY_LOCK = threading.RLock()
 _SMS_CACHE: Optional[dict] = None  # 跨线程共享的号码复用缓存
+# 单国尝试次数：进程内跨账号共享，重启进程即清空
+_COUNTRY_ATTEMPT_LOCK = threading.Lock()
+_COUNTRY_ATTEMPT_COUNTS: dict[str, int] = {}
 
 # OpenAI 走纯 SMS 的国家白名单（截至 2025-2026 实测；其它国家会抽到 WhatsApp 号）
 OPENAI_SMS_COUNTRIES = {"52"}  # Thailand only
@@ -1073,8 +1076,7 @@ class PhoneCallbackController:
         self.completed = False
         self._verify_lock_acquired = False
         self._last_country: Optional[str] = None
-        # 单国已尝试次数（本会话内租号次数）；超过 sms_max_country_attempts 则强制换国
-        self._country_attempt_counts: dict[str, int] = {}
+        # 单国尝试次数见模块级 _COUNTRY_ATTEMPT_COUNTS（跨账号共享，进程重启清空）
         self._stat_recorded_activation_ids: set[str] = set()
 
     def _max_country_attempts(self) -> int:
@@ -1087,11 +1089,24 @@ class PhoneCallbackController:
         except (TypeError, ValueError):
             return 0
 
+    def _country_attempt_count(self, country: str) -> int:
+        with _COUNTRY_ATTEMPT_LOCK:
+            return int(_COUNTRY_ATTEMPT_COUNTS.get(str(country), 0))
+
+    def _bump_country_attempt(self, country: str) -> int:
+        """进程内跨账号累计 +1，返回新值。"""
+        cid = str(country)
+        with _COUNTRY_ATTEMPT_LOCK:
+            n = int(_COUNTRY_ATTEMPT_COUNTS.get(cid, 0)) + 1
+            _COUNTRY_ATTEMPT_COUNTS[cid] = n
+            return n
+
     def _exhausted_countries(self) -> set[str]:
         limit = self._max_country_attempts()
         if limit <= 0:
             return set()
-        return {cid for cid, n in self._country_attempt_counts.items() if n >= limit}
+        with _COUNTRY_ATTEMPT_LOCK:
+            return {cid for cid, n in _COUNTRY_ATTEMPT_COUNTS.items() if n >= limit}
 
     def _filter_country_limit(self, candidates: list[str]) -> list[str]:
         """剔除已达单国尝试上限的国家；若全部被剔除则返回原列表（避免卡死）。"""
@@ -1101,10 +1116,10 @@ class PhoneCallbackController:
         kept = [c for c in candidates if str(c) not in exhausted]
         if kept:
             labels = ",".join(
-                f"{c}({SMS_COUNTRY_NAMES_CN.get(c, '?')})×{self._country_attempt_counts.get(c, 0)}"
+                f"{c}({SMS_COUNTRY_NAMES_CN.get(c, '?')})×{self._country_attempt_count(c)}"
                 for c in sorted(exhausted)
             )
-            self.log(f"🔁 单国尝试已达上限，排除: {labels}")
+            self.log(f"🔁 单国尝试已达上限（跨账号累计），排除: {labels}")
             return kept
         self.log("⚠️ 候选国家均已达单国尝试上限，仍按原候选继续（避免无号可租）")
         return list(candidates)
@@ -1154,7 +1169,7 @@ class PhoneCallbackController:
                 self.log(
                     f"🔁 同一账号保持国家已达上限({self._last_country} "
                     f"{SMS_COUNTRY_NAMES_CN.get(self._last_country, '')} "
-                    f"{self._country_attempt_counts.get(self._last_country, 0)}/{limit})，强制换国家"
+                    f"{self._country_attempt_count(self._last_country)}/{limit})，强制换国家"
                 )
             else:
                 self.log(
@@ -1244,16 +1259,15 @@ class PhoneCallbackController:
 
         reused = bool((self.activation.metadata or {}).get("reused"))
         used_country = str(self.activation.country or country_candidates[0] or "").strip()
+        attempt_n = 0
         if used_country:
-            self._country_attempt_counts[used_country] = (
-                self._country_attempt_counts.get(used_country, 0) + 1
-            )
+            attempt_n = self._bump_country_attempt(used_country)
             self._last_country = used_country
         used_country_label = f"{used_country} {SMS_COUNTRY_NAMES_CN.get(used_country, '')}"
         limit = self._max_country_attempts()
         count_hint = ""
         if limit > 0 and used_country:
-            count_hint = f" 本国会话尝试={self._country_attempt_counts.get(used_country, 0)}/{limit}"
+            count_hint = f" 跨账号累计={attempt_n}/{limit}"
         self.log(f"✅ 已租到号码{'(复用)' if reused else ''}: {self.activation.phone_number} "
                  f"国家={used_country_label}{count_hint} (activation_id={self.activation.activation_id})")
         return self.activation.phone_number
