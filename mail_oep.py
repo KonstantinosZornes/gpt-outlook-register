@@ -257,7 +257,9 @@ class OutlookEmailPlusProvider:
                  params={
                      "email": self.email,
                      "since_minutes": since_minutes,
-                     "from_contains": "openai",
+                     "from_contains": "openai.com",
+                     "code_source": "content",
+                     "code_length": "6-6",
                  })
         if d.get("success"):
             data = d.get("data") or {}
