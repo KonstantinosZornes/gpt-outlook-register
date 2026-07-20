@@ -253,8 +253,42 @@ $$(".tab").forEach((t) => {
     if (t.dataset.tab === "mailcfg") loadMailConfig();
     if (t.dataset.tab === "smscfg") loadSmsConfig();
     if (t.dataset.tab === "exportcfg") loadExportConfig();
+    if (t.dataset.tab === "smsstats") refreshSmsStats();
   });
 });
+
+async function refreshSmsStats() {
+  const tb = $("#smsStatsTable tbody");
+  if (!tb) return;
+  tb.innerHTML = `<tr><td colspan="7">加载中...</td></tr>`;
+  try {
+    const { items } = await api("/api/sms_stats");
+    tb.innerHTML = "";
+    if (!items.length) {
+      tb.innerHTML = `<tr><td colspan="7">暂无接码统计</td></tr>`;
+      return;
+    }
+    for (const r of items) {
+      const rate = Number(r.success_rate || 0);
+      const rateCls = rate >= 80 ? "ok" : (rate >= 50 ? "warn" : "bad");
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><code>${escapeHtml(r.provider)}</code></td>
+        <td>${escapeHtml(r.country_label || r.country || "-")}</td>
+        <td>${Number(r.total_count || 0)}</td>
+        <td>${Number(r.success_count || 0)}</td>
+        <td>${Number(r.fail_count || 0)}</td>
+        <td><span class="sms-rate ${rateCls}">${rate.toFixed(2)}%</span></td>
+        <td>${fmtTime(r.updated_at)}</td>
+      `;
+      tb.appendChild(tr);
+    }
+  } catch (e) {
+    tb.innerHTML = `<tr><td colspan="7">加载失败：${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+$("#btnRefreshSmsStats")?.addEventListener("click", refreshSmsStats);
 
 // ──────────────────────── 号池列表 ────────────────────────
 

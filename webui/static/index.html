@@ -136,6 +136,7 @@
       <button class="tab" data-tab="mailcfg">📧 邮箱配置</button>
       <button class="tab" data-tab="smscfg">📱 接码配置</button>
       <button class="tab" data-tab="exportcfg">📤 自动导出</button>
+      <button class="tab" data-tab="smsstats">📊 接码成功率</button>
     </div>
 
     <div class="tab-content" id="tab-pool">
@@ -490,6 +491,22 @@
           <span id="exportCfgResult" class="result"></span>
         </div>
       </div>
+    </div>
+
+    <div class="tab-content hidden" id="tab-smsstats">
+      <div class="row" style="justify-content:space-between;margin-top:0">
+        <h3 style="margin:0;color:var(--pink-dark)">📊 接码成功率统计</h3>
+        <button id="btnRefreshSmsStats">刷新</button>
+      </div>
+      <p class="hint">
+        按供应商 + 国家累计统计接码结果。成功 = OpenAI phone OTP validate 通过；失败 = 号码被拒、等码超时或流程清理未完成。
+      </p>
+      <table id="smsStatsTable">
+        <thead><tr>
+          <th>供应商</th><th>国家</th><th>总次数</th><th>成功次数</th><th>失败次数</th><th>成功率</th><th>更新时间</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
     </div>
   </section>
 

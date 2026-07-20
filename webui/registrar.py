@@ -92,6 +92,7 @@ _NETWORK_ERROR_PATTERNS = [
     "remote disconnected", "connection reset", "connection aborted",
     "max retries exceeded",
     "余额不足", "sms 余额", "接码平台余额",
+    "codex_oauth_refresh_token_missing",
 ]
 
 
@@ -321,6 +322,11 @@ def _do_register(
         if options.get("want_refresh_token", True):
             d["refresh_token"] = full.get("refresh_token", "")
             d["id_token"] = full.get("id_token", "")
+            if not d["refresh_token"]:
+                raise RuntimeError(
+                    "codex_oauth_refresh_token_missing: 已完成注册但未获取 Codex OAuth refresh_token，"
+                    "本次不落库并释放邮箱回 available"
+                )
 
         # 落库
         db.save_registered(d)
@@ -574,5 +580,4 @@ def get_run_queue(run_id: str) -> Optional[queue.Queue]:
 def remove_run_queue(run_id: str) -> None:
     with _lock:
         _run_queues.pop(run_id, None)
-
 

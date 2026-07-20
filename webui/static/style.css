@@ -317,6 +317,15 @@ td .status {
 .status.done     { background: #e2f0fb; color: var(--done); }
 .status.failed   { background: #fce4e4; color: var(--bad); }
 .status.running  { background: #fff4e1; color: var(--warn); }
+.sms-rate {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 700;
+}
+.sms-rate.ok { background: #e6f5ea; color: var(--ok); }
+.sms-rate.warn { background: #fff4e1; color: var(--warn); }
+.sms-rate.bad { background: #fce4e4; color: var(--bad); }
 
 td button { padding: 3px 8px; font-size: 11px; margin-right: 4px; }
 

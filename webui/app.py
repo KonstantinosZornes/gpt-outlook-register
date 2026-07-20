@@ -458,6 +458,22 @@ def api_get_sms_config():
     return {"ok": True, "config": db.get_sms_config()}
 
 
+@app.get("/api/sms_stats")
+def api_sms_stats():
+    from sms_provider import SMS_COUNTRY_NAMES_CN
+
+    items = []
+    for row in db.list_sms_stats():
+        country = str(row.get("country") or "")
+        country_name = SMS_COUNTRY_NAMES_CN.get(country, "")
+        items.append({
+            **row,
+            "country_name": country_name,
+            "country_label": f"{country} {country_name}".strip(),
+        })
+    return {"ok": True, "items": items}
+
+
 class SaveSmsConfigReq(BaseModel):
     sms_enabled: Optional[str] = None              # "0" / "1"
     sms_provider: Optional[str] = None             # smsbower / herosms

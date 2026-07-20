@@ -1075,6 +1075,7 @@ class PhoneCallbackController:
         self._last_country: Optional[str] = None
         # 单国已尝试次数（本会话内租号次数）；超过 sms_max_country_attempts 则强制换国
         self._country_attempt_counts: dict[str, int] = {}
+        self._stat_recorded_activation_ids: set[str] = set()
 
     def _max_country_attempts(self) -> int:
         """单国最大尝试次数；0 = 不限制。"""
@@ -1112,6 +1113,23 @@ class PhoneCallbackController:
         if self.provider is None:
             self.provider = create_sms_provider(self.provider_key, self.config)
         return self.provider
+
+    def _record_sms_stat(self, success: bool) -> None:
+        """记录 WebUI 接码成功率；非 WebUI/导入失败时静默跳过。"""
+        if not self.activation:
+            return
+        activation_id = str(self.activation.activation_id or "")
+        if not activation_id or activation_id in self._stat_recorded_activation_ids:
+            return
+        country = str(self.activation.country or self._last_country or self.country or "").strip()
+        if not country:
+            return
+        try:
+            from webui import db
+            db.record_sms_stat(self.provider_key, country, success)
+            self._stat_recorded_activation_ids.add(activation_id)
+        except Exception as e:
+            logger.debug("record_sms_stat 失败: %s", e)
 
     def get_phone(self) -> str:
         """阶段 1：租手机号（已带 +）。"""
@@ -1267,6 +1285,7 @@ class PhoneCallbackController:
             except Exception as e:
                 logger.warning("report_success 失败: %s", e)
             self.completed = True
+            self._record_sms_stat(True)
             self.log(f"🎉 已标记号码成功完成: activation_id={self.activation.activation_id}")
         self._release_lock()
 
@@ -1290,6 +1309,7 @@ class PhoneCallbackController:
                 self.provider.mark_send_failed(self.activation.activation_id, reason=reason)
             except Exception:
                 pass
+            self._record_sms_stat(False)
 
     def set_resend_callback(self, callback: Optional[Callable[[], None]]) -> None:
         try:
@@ -1300,6 +1320,7 @@ class PhoneCallbackController:
     def cleanup(self) -> None:
         """流程结束（成功或失败）调用：释放未完成的号、解锁。"""
         if self.activation and not self.completed and self.provider:
+            self._record_sms_stat(False)
             try:
                 ok = self.provider.cancel(self.activation.activation_id)
                 status = "✅已退款" if ok else "❌退款失败"

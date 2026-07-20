@@ -79,6 +79,16 @@ def init_db():
             last_used_at    REAL,
             created_at      REAL DEFAULT (strftime('%s', 'now'))
         );
+
+        CREATE TABLE IF NOT EXISTS sms_stats (
+            provider        TEXT NOT NULL,
+            country         TEXT NOT NULL,
+            total_count     INTEGER NOT NULL DEFAULT 0,
+            success_count   INTEGER NOT NULL DEFAULT 0,
+            fail_count      INTEGER NOT NULL DEFAULT 0,
+            updated_at      REAL,
+            PRIMARY KEY (provider, country)
+        );
     """)
     con.commit()
     # 老 DB migrate：error_category 在后期才加，对已建表补列
@@ -770,6 +780,57 @@ def reset_proxy_usage(proxy: str) -> None:
 
 
 # ──────────────────────── SMS 接码配置 ────────────────────────
+
+
+def record_sms_stat(provider: str, country: str, success: bool) -> None:
+    """按供应商 + 国家累计 SMS 接码成功率。"""
+    provider = str(provider or "").strip().lower()
+    country = str(country or "").strip()
+    if not provider or not country:
+        return
+    with _lock:
+        con = _conn()
+        con.execute(
+            """
+            INSERT INTO sms_stats(
+                provider, country, total_count, success_count, fail_count, updated_at
+            ) VALUES (?, ?, 1, ?, ?, ?)
+            ON CONFLICT(provider, country) DO UPDATE SET
+                total_count = total_count + 1,
+                success_count = success_count + excluded.success_count,
+                fail_count = fail_count + excluded.fail_count,
+                updated_at = excluded.updated_at
+            """,
+            (provider, country, 1 if success else 0, 0 if success else 1, time.time()),
+        )
+        con.commit()
+
+
+def list_sms_stats() -> list[dict]:
+    """返回 SMS 成功率统计。"""
+    con = _conn()
+    rows = con.execute(
+        """
+        SELECT provider, country, total_count, success_count, fail_count, updated_at
+        FROM sms_stats
+        ORDER BY provider ASC, country ASC
+        """
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        total = int(r["total_count"] or 0)
+        success = int(r["success_count"] or 0)
+        fail = int(r["fail_count"] or 0)
+        out.append({
+            "provider": r["provider"],
+            "country": r["country"],
+            "total_count": total,
+            "success_count": success,
+            "fail_count": fail,
+            "success_rate": round((success * 100.0 / total), 2) if total else 0.0,
+            "updated_at": r["updated_at"],
+        })
+    return out
 
 
 def get_sms_config() -> dict:
