@@ -1099,7 +1099,12 @@ async function _loadSmsAllCountries(provider) {
   if (_smsAllCountries.length && _smsCountriesProvider === provider) return _smsAllCountries;
   try {
     const r = await api(`/api/settings/sms/all_countries?provider=${encodeURIComponent(provider)}`);
-    _smsAllCountries = r.countries || [];
+    _smsAllCountries = (r.countries || []).sort((a, b) => {
+      const ai = parseInt(a.id, 10);
+      const bi = parseInt(b.id, 10);
+      if (Number.isFinite(ai) && Number.isFinite(bi)) return ai - bi;
+      return String(a.id || "").localeCompare(String(b.id || ""));
+    });
     _smsSafeCountrySet = new Set(r.openai_sms_safe || []);
     _smsCountriesProvider = provider;
   } catch (e) {
