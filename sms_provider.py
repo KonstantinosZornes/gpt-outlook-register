@@ -150,9 +150,11 @@ SMS_PHONE_LIFETIME = 20 * 60  # 号码租用窗口（秒）
 _SMS_CACHE_LOCK = threading.Lock()
 _SMS_VERIFY_LOCK = threading.RLock()
 _SMS_CACHE: Optional[dict] = None  # 跨线程共享的号码复用缓存
-# 单国尝试次数：进程内跨账号共享，重启进程即清空
-_COUNTRY_ATTEMPT_LOCK = threading.Lock()
-_COUNTRY_ATTEMPT_COUNTS: dict[str, int] = {}
+# 单国不可用：进程内跨账号共享，重启清空。
+# 仅当「单轮内」某国接码失败次数 ≥ sms_max_country_attempts 才写入。
+# 接码失败 = send 被拒 / 等码超时 / 未 report_success。
+_COUNTRY_EXHAUST_LOCK = threading.Lock()
+_EXHAUSTED_COUNTRIES: set[str] = set()
 
 # OpenAI 走纯 SMS 的国家白名单（截至 2025-2026 实测；其它国家会抽到 WhatsApp 号）
 OPENAI_SMS_COUNTRIES = {"52"}  # Thailand only
@@ -1076,11 +1078,13 @@ class PhoneCallbackController:
         self.completed = False
         self._verify_lock_acquired = False
         self._last_country: Optional[str] = None
-        # 单国尝试次数见模块级 _COUNTRY_ATTEMPT_COUNTS（跨账号共享，进程重启清空）
+        # 本轮各国接码失败次数；达限后写入进程级不可用集合
+        self._session_fail_counts: dict[str, int] = {}
+        self._fail_recorded_activation_ids: set[str] = set()
         self._stat_recorded_activation_ids: set[str] = set()
 
     def _max_country_attempts(self) -> int:
-        """单国最大尝试次数；0 = 不限制。"""
+        """单轮内单国最大接码失败次数；0 = 不限制。达限后该国计入进程级不可用（重启清空）。"""
         raw = str(self.config.get("sms_max_country_attempts") or "").strip()
         if not raw:
             return 0
@@ -1089,39 +1093,71 @@ class PhoneCallbackController:
         except (TypeError, ValueError):
             return 0
 
-    def _country_attempt_count(self, country: str) -> int:
-        with _COUNTRY_ATTEMPT_LOCK:
-            return int(_COUNTRY_ATTEMPT_COUNTS.get(str(country), 0))
+    def _session_fail_count(self, country: str) -> int:
+        return int(self._session_fail_counts.get(str(country), 0))
 
-    def _bump_country_attempt(self, country: str) -> int:
-        """进程内跨账号累计 +1，返回新值。"""
-        cid = str(country)
-        with _COUNTRY_ATTEMPT_LOCK:
-            n = int(_COUNTRY_ATTEMPT_COUNTS.get(cid, 0)) + 1
-            _COUNTRY_ATTEMPT_COUNTS[cid] = n
-            return n
+    def _note_sms_failed(self) -> None:
+        """记一次接码失败（send 拒 / 等码超时 / 未 report_success）。
+        同 activation 只计一次；达限写入进程级不可用。"""
+        if not self.activation or self.completed:
+            return
+        aid = str(self.activation.activation_id or "")
+        if aid and aid in self._fail_recorded_activation_ids:
+            return
+        if aid:
+            self._fail_recorded_activation_ids.add(aid)
+        country = str(
+            self.activation.country or self._last_country or self.country or ""
+        ).strip()
+        if not country:
+            return
+        n = self._session_fail_counts.get(country, 0) + 1
+        self._session_fail_counts[country] = n
+        limit = self._max_country_attempts()
+        if limit <= 0:
+            return
+        name = SMS_COUNTRY_NAMES_CN.get(country, "?")
+        if n >= limit:
+            with _COUNTRY_EXHAUST_LOCK:
+                _EXHAUSTED_COUNTRIES.add(country)
+            self.log(
+                f"🔁 本轮 {country}({name}) 接码失败 {n}/{limit} 达上限，"
+                f"计入不可用国家（跨账号，重启清空）"
+            )
+        else:
+            self.log(f"  本轮 {country}({name}) 接码失败 {n}/{limit}")
 
     def _exhausted_countries(self) -> set[str]:
+        """进程级不可用 + 本轮接码失败已达上限的国家。limit=0 时不排除。"""
         limit = self._max_country_attempts()
         if limit <= 0:
             return set()
-        with _COUNTRY_ATTEMPT_LOCK:
-            return {cid for cid, n in _COUNTRY_ATTEMPT_COUNTS.items() if n >= limit}
+        with _COUNTRY_EXHAUST_LOCK:
+            exhausted = set(_EXHAUSTED_COUNTRIES)
+        exhausted |= {
+            cid for cid, n in self._session_fail_counts.items() if n >= limit
+        }
+        return exhausted
 
     def _filter_country_limit(self, candidates: list[str]) -> list[str]:
-        """剔除已达单国尝试上限的国家；若全部被剔除则返回原列表（避免卡死）。"""
+        """剔除不可用国家；若全部被剔除则返回原列表（避免卡死）。"""
         exhausted = self._exhausted_countries()
         if not exhausted:
             return list(candidates)
         kept = [c for c in candidates if str(c) not in exhausted]
         if kept:
-            labels = ",".join(
-                f"{c}({SMS_COUNTRY_NAMES_CN.get(c, '?')})×{self._country_attempt_count(c)}"
-                for c in sorted(exhausted)
-            )
-            self.log(f"🔁 单国尝试已达上限（跨账号累计），排除: {labels}")
+            with _COUNTRY_EXHAUST_LOCK:
+                process_set = set(_EXHAUSTED_COUNTRIES)
+            parts = []
+            for c in sorted(exhausted):
+                name = SMS_COUNTRY_NAMES_CN.get(c, "?")
+                if c in process_set:
+                    parts.append(f"{c}({name})·不可用")
+                else:
+                    parts.append(f"{c}({name})×接码失败{self._session_fail_count(c)}")
+            self.log(f"🔁 排除不可用国家: {','.join(parts)}")
             return kept
-        self.log("⚠️ 候选国家均已达单国尝试上限，仍按原候选继续（避免无号可租）")
+        self.log("⚠️ 候选国家均不可用，仍按原候选继续（避免无号可租）")
         return list(candidates)
 
     def _provider(self) -> BaseSmsProvider:
@@ -1166,10 +1202,17 @@ class PhoneCallbackController:
         if self.keep_country and self._last_country:
             if self._last_country in exhausted:
                 limit = self._max_country_attempts()
+                with _COUNTRY_EXHAUST_LOCK:
+                    proc = self._last_country in _EXHAUSTED_COUNTRIES
+                why = (
+                    "进程不可用"
+                    if proc
+                    else f"本轮接码失败{self._session_fail_count(self._last_country)}/{limit}"
+                )
                 self.log(
                     f"🔁 同一账号保持国家已达上限({self._last_country} "
                     f"{SMS_COUNTRY_NAMES_CN.get(self._last_country, '')} "
-                    f"{self._country_attempt_count(self._last_country)}/{limit})，强制换国家"
+                    f"{why})，强制换国家"
                 )
             else:
                 self.log(
@@ -1259,15 +1302,13 @@ class PhoneCallbackController:
 
         reused = bool((self.activation.metadata or {}).get("reused"))
         used_country = str(self.activation.country or country_candidates[0] or "").strip()
-        attempt_n = 0
         if used_country:
-            attempt_n = self._bump_country_attempt(used_country)
             self._last_country = used_country
         used_country_label = f"{used_country} {SMS_COUNTRY_NAMES_CN.get(used_country, '')}"
         limit = self._max_country_attempts()
         count_hint = ""
         if limit > 0 and used_country:
-            count_hint = f" 跨账号累计={attempt_n}/{limit}"
+            count_hint = f" 本轮接码失败={self._session_fail_count(used_country)}/{limit}"
         self.log(f"✅ 已租到号码{'(复用)' if reused else ''}: {self.activation.phone_number} "
                  f"国家={used_country_label}{count_hint} (activation_id={self.activation.activation_id})")
         return self.activation.phone_number
@@ -1293,6 +1334,7 @@ class PhoneCallbackController:
         return code
 
     def report_success(self) -> None:
+        """接码成功：OTP 校验通过后调用。"""
         if self.activation and self.provider and not self.completed:
             try:
                 self.provider.report_success(self.activation.activation_id)
@@ -1318,12 +1360,14 @@ class PhoneCallbackController:
                 pass
 
     def mark_send_failed(self, reason: str = "") -> None:
+        """OpenAI 拒号 / send 失败。"""
         if self.activation and self.provider:
             try:
                 self.provider.mark_send_failed(self.activation.activation_id, reason=reason)
             except Exception:
                 pass
             self._record_sms_stat(False)
+            self._note_sms_failed()
 
     def set_resend_callback(self, callback: Optional[Callable[[], None]]) -> None:
         try:
@@ -1332,9 +1376,10 @@ class PhoneCallbackController:
             pass
 
     def cleanup(self) -> None:
-        """流程结束（成功或失败）调用：释放未完成的号、解锁。"""
+        """流程结束：未 report_success 则计接码失败并 cancel。"""
         if self.activation and not self.completed and self.provider:
             self._record_sms_stat(False)
+            self._note_sms_failed()
             try:
                 ok = self.provider.cancel(self.activation.activation_id)
                 status = "✅已退款" if ok else "❌退款失败"

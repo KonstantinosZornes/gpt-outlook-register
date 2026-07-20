@@ -382,7 +382,7 @@
             <label style="flex:1">最多换号次数 <small>（空 = 默认 8；自定义请填正整数）</small>
               <input id="smsMaxPhoneAttempts" placeholder="留空 = 默认 8" type="number" min="1" max="30">
             </label>
-            <label style="flex:1">单国最大尝试次数 <small>（空/0 = 不限；跨账号累计，超则换国；重启清空）</small>
+            <label style="flex:1">单国最大接码失败 <small>（空/0 = 不限；单轮达限记不可用；跨账号，重启清空）</small>
               <input id="smsMaxCountryAttempts" placeholder="留空 = 不限制" type="number" min="0" max="30">
             </label>
             <label style="flex:1">resend 间隔秒数 <small>（默认 20；OpenAI 端重发 OTP 的间隔）</small>
@@ -396,7 +396,7 @@
             💡 单号等待窗口 = 间隔 × 次数 + 20s 缓冲
             （当前 <span id="smsPerPhoneHint">80</span>s）。
             失败时立刻 cancel 当前号 + 换新号继续，不浪费时间。
-            单国尝试跨账号累计（进程内共享，重启清空）；超限后从候选排除该国（含「保持国家不变」也会被强制换国）。
+            按接码失败累计（拒号/等码超时）；单轮达限记不可用（跨账号，重启清空）；本轮也会立刻换国。
           </p>
         </fieldset>
 
