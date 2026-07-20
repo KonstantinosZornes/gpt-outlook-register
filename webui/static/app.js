@@ -865,6 +865,7 @@ const PERSIST_FIELDS = {
   regOtpTimeout:   "text",
   regStrictEmail:  "check",
   regRandomProxyFromPool: "check",
+  skipHumanDelay:  "check",
   autoCoolDown:      "text",
   autoConcurrency:   "text",
   autoProxyPool:     "text",
@@ -916,6 +917,9 @@ async function loadProxyConfig() {
     $("#rotateProxyEvery").value = config.rotate_proxy_every || "5";
     $("#proxyMaxUses").value = config.proxy_max_uses || "10";
     $("#regRandomProxyFromPool").checked = config.random_proxy_from_pool === "1";
+    if ($("#skipHumanDelay")) {
+      $("#skipHumanDelay").checked = config.skip_human_delay === "1";
+    }
     _saveForm();
   } catch (e) {
     console.error("loadProxyConfig:", e);
@@ -936,6 +940,7 @@ $("#btnSaveProxyCfg").addEventListener("click", async () => {
         rotate_proxy_every: parseInt($("#rotateProxyEvery").value || "5", 10) || 5,
         proxy_max_uses: parseInt($("#proxyMaxUses").value || "10", 10) || 10,
         random_proxy_from_pool: $("#regRandomProxyFromPool").checked,
+        skip_human_delay: $("#skipHumanDelay")?.checked || false,
       }),
     });
     resultEl.textContent = "✅ 已保存";
@@ -946,6 +951,21 @@ $("#btnSaveProxyCfg").addEventListener("click", async () => {
     resultEl.className = "result bad";
   }
   setTimeout(() => { resultEl.textContent = ""; }, 3000);
+});
+
+// 跳过人类模拟：勾选即落库（无需点保存代理）
+$("#skipHumanDelay")?.addEventListener("change", async () => {
+  _saveForm();
+  try {
+    await api("/api/settings/proxy", {
+      method: "POST",
+      body: JSON.stringify({
+        skip_human_delay: $("#skipHumanDelay").checked,
+      }),
+    });
+  } catch (e) {
+    console.error("save skip_human_delay:", e);
+  }
 });
 
 
@@ -1155,6 +1175,7 @@ async function loadSmsConfig() {
     $("#smsAutoMaxPrice").value = config.sms_auto_max_price || "";
     _renderSmsAllowedCountriesBox(config.sms_allowed_countries || "");
     $("#smsMaxPhoneAttempts").value = config.sms_max_phone_attempts || "";
+    $("#smsMaxCountryAttempts").value = config.sms_max_country_attempts || "";
     $("#smsResendInterval").value = config.sms_resend_interval || "20";
     $("#smsResendMax").value = config.sms_resend_max || "3";
     _updateSmsPerPhoneHint();
@@ -1220,10 +1241,11 @@ $("#btnSaveSmsCfg").addEventListener("click", async () => {
     sms_allowed_countries: _getAllowedCountriesValue(),
     sms_auto_min_stock:    $("#smsAutoMinStock").value.trim() || "20",
     sms_auto_max_price:    $("#smsAutoMaxPrice").value.trim(),
-    sms_max_phone_attempts: $("#smsMaxPhoneAttempts").value.trim(),
-    sms_resend_interval:    $("#smsResendInterval").value.trim() || "20",
-    sms_resend_max:         $("#smsResendMax").value.trim() || "3",
-    sms_min_balance:       $("#smsMinBalance").value.trim(),
+    sms_max_phone_attempts:   $("#smsMaxPhoneAttempts").value.trim(),
+    sms_max_country_attempts: $("#smsMaxCountryAttempts").value.trim(),
+    sms_resend_interval:      $("#smsResendInterval").value.trim() || "20",
+    sms_resend_max:           $("#smsResendMax").value.trim() || "3",
+    sms_min_balance:          $("#smsMinBalance").value.trim(),
   };
   try {
     await api("/api/settings/sms", { method: "POST", body: JSON.stringify(body) });

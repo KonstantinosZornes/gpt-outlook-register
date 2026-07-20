@@ -1073,6 +1073,40 @@ class PhoneCallbackController:
         self.completed = False
         self._verify_lock_acquired = False
         self._last_country: Optional[str] = None
+        # 单国已尝试次数（本会话内租号次数）；超过 sms_max_country_attempts 则强制换国
+        self._country_attempt_counts: dict[str, int] = {}
+
+    def _max_country_attempts(self) -> int:
+        """单国最大尝试次数；0 = 不限制。"""
+        raw = str(self.config.get("sms_max_country_attempts") or "").strip()
+        if not raw:
+            return 0
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
+
+    def _exhausted_countries(self) -> set[str]:
+        limit = self._max_country_attempts()
+        if limit <= 0:
+            return set()
+        return {cid for cid, n in self._country_attempt_counts.items() if n >= limit}
+
+    def _filter_country_limit(self, candidates: list[str]) -> list[str]:
+        """剔除已达单国尝试上限的国家；若全部被剔除则返回原列表（避免卡死）。"""
+        exhausted = self._exhausted_countries()
+        if not exhausted:
+            return list(candidates)
+        kept = [c for c in candidates if str(c) not in exhausted]
+        if kept:
+            labels = ",".join(
+                f"{c}({SMS_COUNTRY_NAMES_CN.get(c, '?')})×{self._country_attempt_counts.get(c, 0)}"
+                for c in sorted(exhausted)
+            )
+            self.log(f"🔁 单国尝试已达上限，排除: {labels}")
+            return kept
+        self.log("⚠️ 候选国家均已达单国尝试上限，仍按原候选继续（避免无号可租）")
+        return list(candidates)
 
     def _provider(self) -> BaseSmsProvider:
         if self.provider is None:
@@ -1092,11 +1126,24 @@ class PhoneCallbackController:
         allowed_list = [c.strip() for c in allowed_raw.replace(";", ",").split(",") if c.strip()]
 
         raw_candidates: list[str] = []
+        exhausted = self._exhausted_countries()
 
         # 如果要求同一账号保持国家不变，且已经租过号，则沿用上次国家
+        # 但该国已达单国尝试上限时强制换国
         if self.keep_country and self._last_country:
-            self.log(f"🔒 同一账号保持国家不变: 沿用 {self._last_country} {SMS_COUNTRY_NAMES_CN.get(self._last_country, '')}")
-            raw_candidates = [self._last_country]
+            if self._last_country in exhausted:
+                limit = self._max_country_attempts()
+                self.log(
+                    f"🔁 同一账号保持国家已达上限({self._last_country} "
+                    f"{SMS_COUNTRY_NAMES_CN.get(self._last_country, '')} "
+                    f"{self._country_attempt_counts.get(self._last_country, 0)}/{limit})，强制换国家"
+                )
+            else:
+                self.log(
+                    f"🔒 同一账号保持国家不变: 沿用 {self._last_country} "
+                    f"{SMS_COUNTRY_NAMES_CN.get(self._last_country, '')}"
+                )
+                raw_candidates = [self._last_country]
 
         if not raw_candidates:
             if self.auto_select_country and isinstance(provider, SmsBowerProvider):
@@ -1149,13 +1196,19 @@ class PhoneCallbackController:
                         self.log(f"⚠️ 国家智能选择失败({e})，使用默认 country")
                         raw_candidates = [self.country] if self.country else []
             else:
-                # 没启用自动选号 → 强制用默认国家
-                raw_candidates = [self.country] if self.country else []
+                # 没启用自动选号 → 默认国家；若该国已达上限且勾了允许列表，则改用允许列表
+                if self.country and self.country not in exhausted:
+                    raw_candidates = [self.country]
+                elif allowed_list:
+                    self.log("🔁 默认国家已达单国上限，改从「允许的国家」里选")
+                    raw_candidates = list(allowed_list)
+                else:
+                    raw_candidates = [self.country] if self.country else []
 
-        country_candidates = list(raw_candidates)
+        country_candidates = self._filter_country_limit(raw_candidates)
         if not country_candidates:
             self.log(f"⚠️ 没有候选国家，fallback 默认国家 {SMS_DEFAULT_COUNTRY}")
-            country_candidates = [SMS_DEFAULT_COUNTRY]
+            country_candidates = self._filter_country_limit([SMS_DEFAULT_COUNTRY]) or [SMS_DEFAULT_COUNTRY]
 
         country_label_log = ",".join(
             f"{c}({SMS_COUNTRY_NAMES_CN.get(c, '?')})" for c in country_candidates[:5]
@@ -1172,12 +1225,19 @@ class PhoneCallbackController:
             raise
 
         reused = bool((self.activation.metadata or {}).get("reused"))
-        used_country = self.activation.country or country_candidates[0]
-        if self.keep_country:
+        used_country = str(self.activation.country or country_candidates[0] or "").strip()
+        if used_country:
+            self._country_attempt_counts[used_country] = (
+                self._country_attempt_counts.get(used_country, 0) + 1
+            )
             self._last_country = used_country
         used_country_label = f"{used_country} {SMS_COUNTRY_NAMES_CN.get(used_country, '')}"
+        limit = self._max_country_attempts()
+        count_hint = ""
+        if limit > 0 and used_country:
+            count_hint = f" 本国会话尝试={self._country_attempt_counts.get(used_country, 0)}/{limit}"
         self.log(f"✅ 已租到号码{'(复用)' if reused else ''}: {self.activation.phone_number} "
-                 f"国家={used_country_label} (activation_id={self.activation.activation_id})")
+                 f"国家={used_country_label}{count_hint} (activation_id={self.activation.activation_id})")
         return self.activation.phone_number
 
     def get_code(self, timeout: int = 180, *,

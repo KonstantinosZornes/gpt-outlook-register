@@ -158,6 +158,9 @@ def _do_register(
             env_overrides["SKIP_OAUTH_TOKEN_EXCHANGE"] = "1"
             env_overrides["OAUTH_CODEX_RT_EXCHANGE"] = "0"
             env_overrides["OAUTH_CODEX_RT_BEFORE_CALLBACK"] = "0"
+        # 跳过人类模拟间隔（auth_flow._human_delay 读 HUMAN_DELAY）
+        if db.get_setting("skip_human_delay", "0") in ("1", "true", "yes", "on"):
+            env_overrides["HUMAN_DELAY"] = "0"
         # PROXY 走 cfg.proxy，无需 env
         for k, v in env_overrides.items():
             saved_env[k] = os.environ.get(k)

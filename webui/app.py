@@ -475,6 +475,7 @@ class SaveSmsConfigReq(BaseModel):
     sms_auto_min_stock: Optional[str] = None
     sms_auto_max_price: Optional[str] = None
     sms_max_phone_attempts: Optional[str] = None   # 空 = 用 provider 默认；>0 = 自定义
+    sms_max_country_attempts: Optional[str] = None # 空/0 = 不限；>0 = 单国尝试超限后换国
     sms_resend_interval: Optional[str] = None      # OpenAI resend 间隔秒数（默认 20）
     sms_resend_max: Optional[str] = None           # OpenAI resend 最多次数（默认 3）
     sms_min_balance: Optional[str] = None          # 短信供应商最低余额；低于则停止注册
@@ -698,6 +699,7 @@ class ProxyConfigReq(BaseModel):
     rotate_proxy_every: Optional[int] = None
     proxy_max_uses: Optional[int] = None
     random_proxy_from_pool: Optional[bool] = None
+    skip_human_delay: Optional[bool] = None
 
 
 @app.get("/api/settings/proxy")

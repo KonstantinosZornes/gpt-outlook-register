@@ -655,6 +655,7 @@ def get_proxy_config() -> dict:
         "rotate_proxy_every": get_setting("rotate_proxy_every", "5"),
         "proxy_max_uses":    get_setting("proxy_max_uses", str(DEFAULT_PROXY_MAX_USES)),
         "random_proxy_from_pool": get_setting("random_proxy_from_pool", "0"),
+        "skip_human_delay":  get_setting("skip_human_delay", "0"),
     }
 
 
@@ -672,6 +673,13 @@ def save_proxy_config(data: dict) -> None:
         set_setting("proxy_max_uses", str(max(1, int(data.get("proxy_max_uses", DEFAULT_PROXY_MAX_USES)))))
     if "random_proxy_from_pool" in data:
         set_setting("random_proxy_from_pool", "1" if data["random_proxy_from_pool"] else "0")
+    if "skip_human_delay" in data:
+        v = data["skip_human_delay"]
+        if isinstance(v, bool):
+            set_setting("skip_human_delay", "1" if v else "0")
+        else:
+            s = str(v).strip().lower()
+            set_setting("skip_human_delay", "1" if s in ("1", "true", "yes", "on") else "0")
 
 
 # ──────────────────────── 代理使用统计 ────────────────────────
@@ -796,10 +804,11 @@ def get_sms_config() -> dict:
         "sms_allowed_countries":   get_setting("sms_allowed_countries", ""),
         "sms_auto_min_stock":      get_setting("sms_auto_min_stock", "20"),
         "sms_auto_max_price":      get_setting("sms_auto_max_price", ""),
-        "sms_max_phone_attempts":  get_setting("sms_max_phone_attempts", ""),
-        "sms_resend_interval":     get_setting("sms_resend_interval", "20"),
-        "sms_resend_max":          get_setting("sms_resend_max", "3"),
-        "sms_min_balance":         get_setting("sms_min_balance", ""),
+        "sms_max_phone_attempts":   get_setting("sms_max_phone_attempts", ""),
+        "sms_max_country_attempts": get_setting("sms_max_country_attempts", ""),
+        "sms_resend_interval":      get_setting("sms_resend_interval", "20"),
+        "sms_resend_max":           get_setting("sms_resend_max", "3"),
+        "sms_min_balance":          get_setting("sms_min_balance", ""),
     }
 
 
@@ -816,7 +825,8 @@ def save_sms_config(data: dict) -> None:
     for key in (
         "sms_country", "sms_service", "sms_max_price",
         "sms_phone_success_max", "sms_auto_min_stock", "sms_auto_max_price",
-        "sms_max_phone_attempts", "sms_resend_interval", "sms_resend_max",
+        "sms_max_phone_attempts", "sms_max_country_attempts",
+        "sms_resend_interval", "sms_resend_max",
         "sms_allowed_countries", "sms_min_balance",
     ):
         if key in data:
@@ -860,6 +870,7 @@ def get_sms_internal_config() -> dict:
         "sms_auto_min_stock":      get_setting("sms_auto_min_stock", "20"),
         "sms_auto_max_price":      get_setting("sms_auto_max_price", ""),
         "sms_max_phone_attempts":  get_setting("sms_max_phone_attempts", ""),
+        "sms_max_country_attempts": get_setting("sms_max_country_attempts", ""),
         "sms_resend_interval":     get_setting("sms_resend_interval", "20"),
         "sms_resend_max":          get_setting("sms_resend_max", "3"),
         "sms_min_balance":         get_setting("sms_min_balance", ""),
