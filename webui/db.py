@@ -91,10 +91,12 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS sms_exhausted_countries (
-            country         TEXT PRIMARY KEY,
+            provider        TEXT NOT NULL DEFAULT 'smsbower',
+            country         TEXT NOT NULL,
             reason          TEXT,
             fail_count      INTEGER NOT NULL DEFAULT 0,
-            created_at      REAL
+            created_at      REAL,
+            PRIMARY KEY (provider, country)
         );
     """)
     con.commit()
@@ -844,40 +846,55 @@ def record_sms_stat(provider: str, country: str, success: bool) -> None:
 def add_sms_exhausted_country(
     country: str,
     *,
+    provider: str = "smsbower",
     reason: str = "",
     fail_count: int = 0,
 ) -> None:
-    """标记国家为不可用（单轮接码失败达限）。已存在则更新 reason/fail_count。"""
+    """标记某供应商下的国家为不可用。已存在则更新 reason/fail_count。"""
     country = str(country or "").strip()
+    provider = str(provider or "smsbower").strip().lower() or "smsbower"
     if not country:
         return
     with _lock:
         con = _conn()
         con.execute(
             """
-            INSERT INTO sms_exhausted_countries(country, reason, fail_count, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(country) DO UPDATE SET
+            INSERT INTO sms_exhausted_countries(provider, country, reason, fail_count, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(provider, country) DO UPDATE SET
                 reason = excluded.reason,
                 fail_count = excluded.fail_count
             """,
-            (country, (reason or "")[:500], int(fail_count or 0), time.time()),
+            (provider, country, (reason or "")[:500], int(fail_count or 0), time.time()),
         )
         con.commit()
 
 
-def list_sms_exhausted_countries() -> list[dict]:
-    """返回已标记不可用的国家列表。"""
+def list_sms_exhausted_countries(provider: Optional[str] = None) -> list[dict]:
+    """返回已标记不可用的国家列表。provider 为空=全部供应商。"""
     con = _conn()
-    rows = con.execute(
-        """
-        SELECT country, reason, fail_count, created_at
-        FROM sms_exhausted_countries
-        ORDER BY created_at DESC, country ASC
-        """
-    ).fetchall()
+    pk = str(provider or "").strip().lower()
+    if pk:
+        rows = con.execute(
+            """
+            SELECT provider, country, reason, fail_count, created_at
+            FROM sms_exhausted_countries
+            WHERE provider = ?
+            ORDER BY created_at DESC, country ASC
+            """,
+            (pk,),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            """
+            SELECT provider, country, reason, fail_count, created_at
+            FROM sms_exhausted_countries
+            ORDER BY provider ASC, created_at DESC, country ASC
+            """
+        ).fetchall()
     return [
         {
+            "provider": r["provider"] or "smsbower",
             "country": r["country"],
             "reason": r["reason"] or "",
             "fail_count": int(r["fail_count"] or 0),
@@ -887,12 +904,29 @@ def list_sms_exhausted_countries() -> list[dict]:
     ]
 
 
-def clear_sms_exhausted_countries(country: Optional[str] = None) -> int:
-    """清空不可用国家。country 为空=全部；指定则只删一国。返回删除行数。"""
+def clear_sms_exhausted_countries(
+    country: Optional[str] = None,
+    *,
+    provider: Optional[str] = None,
+) -> int:
+    """清空不可用国家。
+    provider/country 均可选：都空=全部；仅 provider=该供应商全部；两者都有=指定一行。
+    """
     with _lock:
         con = _conn()
+        pk = str(provider or "").strip().lower()
         cid = str(country or "").strip()
-        if cid:
+        if pk and cid:
+            rc = con.execute(
+                "DELETE FROM sms_exhausted_countries WHERE provider=? AND country=?",
+                (pk, cid),
+            )
+        elif pk:
+            rc = con.execute(
+                "DELETE FROM sms_exhausted_countries WHERE provider=?",
+                (pk,),
+            )
+        elif cid:
             rc = con.execute(
                 "DELETE FROM sms_exhausted_countries WHERE country=?",
                 (cid,),

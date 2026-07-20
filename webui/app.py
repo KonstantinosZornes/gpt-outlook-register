@@ -486,14 +486,15 @@ def api_sms_stats():
 
 
 @app.get("/api/sms_exhausted")
-def api_sms_exhausted():
-    """列出持久化的不可用国家。"""
+def api_sms_exhausted(provider: str = ""):
+    """列出持久化的不可用国家。query provider 可选，空=全部供应商。"""
     from sms_provider import SMS_COUNTRY_NAMES_CN, list_exhausted_countries
 
+    pk = (provider or "").strip().lower() or None
     # 确保内存缓存已加载（与 DB 对齐）
-    list_exhausted_countries()
+    list_exhausted_countries(pk)
     items = []
-    for row in db.list_sms_exhausted_countries():
+    for row in db.list_sms_exhausted_countries(pk):
         country = str(row.get("country") or "")
         name = SMS_COUNTRY_NAMES_CN.get(country, "")
         items.append({
@@ -501,16 +502,20 @@ def api_sms_exhausted():
             "country_name": name,
             "country_label": f"{country} {name}".strip(),
         })
-    return {"ok": True, "items": items}
+    return {"ok": True, "items": items, "provider": pk}
 
 
 @app.post("/api/sms_exhausted/clear")
-def api_sms_exhausted_clear(country: str = ""):
-    """清空不可用国家。query country 可选，空=全部。"""
+def api_sms_exhausted_clear(country: str = "", provider: str = ""):
+    """清空不可用国家。
+    query provider/country 均可选：都空=全部；仅 provider=该供应商全部；两者都有=指定一行。
+    """
     from sms_provider import clear_exhausted_countries
 
-    n = clear_exhausted_countries((country or "").strip() or None)
-    return {"ok": True, "cleared": n, "country": (country or "").strip() or None}
+    pk = (provider or "").strip().lower() or None
+    cid = (country or "").strip() or None
+    n = clear_exhausted_countries(cid, provider=pk)
+    return {"ok": True, "cleared": n, "country": cid, "provider": pk}
 
 
 class SaveSmsConfigReq(BaseModel):

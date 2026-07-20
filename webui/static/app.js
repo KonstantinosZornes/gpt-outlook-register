@@ -260,37 +260,51 @@ $$(".tab").forEach((t) => {
   });
 });
 
+function _exhaustedProviderFilter() {
+  return ($("#exhaustedProviderFilter")?.value || "").trim().toLowerCase();
+}
+
 async function refreshExhaustedCountries() {
   const tb = $("#exhaustedTable tbody");
   const countEl = $("#exhaustedCount");
   if (!tb) return;
-  tb.innerHTML = `<tr><td colspan="5">加载中...</td></tr>`;
+  tb.innerHTML = `<tr><td colspan="6">加载中...</td></tr>`;
   try {
-    const { items } = await api("/api/sms_exhausted");
+    const pk = _exhaustedProviderFilter();
+    const qs = pk ? `?provider=${encodeURIComponent(pk)}` : "";
+    const { items } = await api(`/api/sms_exhausted${qs}`);
     tb.innerHTML = "";
     if (countEl) countEl.textContent = items.length ? `${items.length} 个` : "无";
     if (!items.length) {
-      tb.innerHTML = `<tr><td colspan="5">暂无不可用国家</td></tr>`;
+      tb.innerHTML = `<tr><td colspan="6">暂无不可用国家</td></tr>`;
       return;
     }
     for (const r of items) {
       const tr = document.createElement("tr");
       const cid = String(r.country || "");
+      const prov = String(r.provider || "smsbower");
       tr.innerHTML = `
+        <td>${escapeHtml(prov)}</td>
         <td>${escapeHtml(r.country_label || cid || "-")}</td>
         <td>${escapeHtml(r.reason || "-")}</td>
         <td>${Number(r.fail_count || 0)}</td>
         <td>${fmtTime(r.created_at)}</td>
-        <td><button type="button" class="btn-clear-one-exhausted" data-country="${escapeHtml(cid)}">清除</button></td>
+        <td><button type="button" class="btn-clear-one-exhausted"
+              data-provider="${escapeHtml(prov)}"
+              data-country="${escapeHtml(cid)}">清除</button></td>
       `;
       tb.appendChild(tr);
     }
     tb.querySelectorAll(".btn-clear-one-exhausted").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const c = btn.dataset.country || "";
+        const p = btn.dataset.provider || "";
         if (!c) return;
         try {
-          await api(`/api/sms_exhausted/clear?country=${encodeURIComponent(c)}`, { method: "POST" });
+          const params = new URLSearchParams();
+          params.set("country", c);
+          if (p) params.set("provider", p);
+          await api(`/api/sms_exhausted/clear?${params}`, { method: "POST" });
           refreshExhaustedCountries();
         } catch (e) {
           alert("清除失败: " + e.message);
@@ -298,16 +312,20 @@ async function refreshExhaustedCountries() {
       });
     });
   } catch (e) {
-    tb.innerHTML = `<tr><td colspan="5">加载失败：${escapeHtml(e.message)}</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="6">加载失败：${escapeHtml(e.message)}</td></tr>`;
     if (countEl) countEl.textContent = "";
   }
 }
 
 $("#btnRefreshExhausted")?.addEventListener("click", refreshExhaustedCountries);
+$("#exhaustedProviderFilter")?.addEventListener("change", refreshExhaustedCountries);
 $("#btnClearAllExhausted")?.addEventListener("click", async () => {
-  if (!confirm("清空全部不可用国家？")) return;
+  const pk = _exhaustedProviderFilter();
+  const tip = pk ? `清空供应商 ${pk} 的全部不可用国家？` : "清空全部不可用国家？";
+  if (!confirm(tip)) return;
   try {
-    const r = await api("/api/sms_exhausted/clear", { method: "POST" });
+    const qs = pk ? `?provider=${encodeURIComponent(pk)}` : "";
+    const r = await api(`/api/sms_exhausted/clear${qs}`, { method: "POST" });
     alert(`已清空 ${r.cleared || 0} 个`);
     refreshExhaustedCountries();
   } catch (e) {
