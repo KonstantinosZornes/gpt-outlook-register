@@ -334,6 +334,34 @@ def release_stale_in_use(stale_seconds: float = 1800) -> int:
         return rc.rowcount
 
 
+def fail_orphan_work_on_restart(
+    reason: str = "WebUI 重启，任务中断",
+) -> dict[str, int]:
+    """进程重启后清理上轮残留：running runs + in_use 账号 → failed。
+
+    返回 {"runs": n, "accounts": m}。
+    """
+    now = time.time()
+    err = (reason or "WebUI 重启，任务中断")[:500]
+    with _lock:
+        con = _conn()
+        rc_runs = con.execute(
+            "UPDATE runs SET status='failed', finished_at=?, error=?, "
+            "error_category='unknown' WHERE status='running'",
+            (now, err),
+        )
+        rc_acc = con.execute(
+            "UPDATE outlook_accounts SET status='failed', finished_at=?, fail_reason=? "
+            "WHERE status='in_use'",
+            (now, err),
+        )
+        con.commit()
+        return {
+            "runs": int(rc_runs.rowcount or 0),
+            "accounts": int(rc_acc.rowcount or 0),
+        }
+
+
 def delete_account(email: str) -> bool:
     with _lock:
         con = _conn()

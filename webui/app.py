@@ -32,7 +32,18 @@ from auth_flow import AuthFlow  # noqa: E402
 from config import Config  # noqa: E402
 from proxy_utils import mask_proxy_url, parse_proxy_pool  # noqa: E402
 
-# 启动时自动释放卡死的 in_use 号（上次进程崩溃 / 强退留下的）
+# 启动时：上轮残留 running 任务 / in_use 账号标为失败（进程已死无法继续）
+try:
+    _orphan = db.fail_orphan_work_on_restart()
+    if _orphan.get("runs") or _orphan.get("accounts"):
+        logging.getLogger("webui").info(
+            "[startup] 重启清理: runs→failed=%s, in_use→failed=%s",
+            _orphan.get("runs", 0),
+            _orphan.get("accounts", 0),
+        )
+except Exception as _e:
+    logging.getLogger("webui").warning(f"[startup] fail_orphan 失败: {_e}")
+# 兜底：极老的 in_use（若有其它路径漏标）仍释放回 available
 try:
     _released = db.release_stale_in_use(stale_seconds=1800)
     if _released > 0:
