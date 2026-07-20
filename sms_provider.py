@@ -1122,7 +1122,6 @@ class PhoneCallbackController:
         country: str = "",
         log_fn: Optional[Callable[[str], None]] = None,
         auto_select_country: bool = False,
-        keep_country: bool = False,
     ):
         self.provider_key = provider_key
         self.config = dict(config or {})
@@ -1130,7 +1129,6 @@ class PhoneCallbackController:
         self.country = country
         self.log = log_fn or logger.info
         self.auto_select_country = bool(auto_select_country)
-        self.keep_country = bool(keep_country)
         self.provider: Optional[BaseSmsProvider] = None
         self.activation: Optional[SmsActivation] = None
         self.completed = False
@@ -1257,90 +1255,64 @@ class PhoneCallbackController:
         raw_candidates: list[str] = []
         exhausted = self._exhausted_countries()
 
-        # 如果要求同一账号保持国家不变，且已经租过号，则沿用上次国家
-        # 但该国已达单国尝试上限时强制换国
-        if self.keep_country and self._last_country:
-            if self._last_country in exhausted:
-                limit = self._max_country_attempts()
-                _load_exhausted_from_db()
-                with _COUNTRY_EXHAUST_LOCK:
-                    proc = self._last_country in _EXHAUSTED_COUNTRIES
-                why = (
-                    "已标记不可用"
-                    if proc
-                    else f"本轮接码失败{self._session_fail_count(self._last_country)}/{limit}"
-                )
-                self.log(
-                    f"🔁 同一账号保持国家已达上限({self._last_country} "
-                    f"{SMS_COUNTRY_NAMES_CN.get(self._last_country, '')} "
-                    f"{why})，强制换国家"
-                )
-            else:
-                self.log(
-                    f"🔒 同一账号保持国家不变: 沿用 {self._last_country} "
-                    f"{SMS_COUNTRY_NAMES_CN.get(self._last_country, '')}"
-                )
-                raw_candidates = [self._last_country]
-
-        if not raw_candidates:
-            if self.auto_select_country and isinstance(provider, SmsBowerProvider):
-                if allowed_list:
-                    self.log(f"🔍 自动选号: 从主人勾选的 {len(allowed_list)} 个国家依次尝试（按价格升序）")
-                    try:
-                        rows = provider.get_top_countries(service=self.service)
-                        # 按价格升序排，只保留在 allowed_list 中的
-                        in_allow = [r for r in rows if str(r.get("country") or "") in allowed_list]
-                        ordered_allowed = [str(r["country"]) for r in in_allow]
-                        # 把 allowed 里没在排名中出现的也加在最后
-                        appended = [c for c in allowed_list if c not in ordered_allowed]
-                        raw_candidates = ordered_allowed + appended
-                        self.log(f"  候选顺序: {','.join(raw_candidates)}")
-                    except Exception as e:
-                        self.log(f"  排名查询失败({e})，按主人勾选的原始顺序尝试")
-                        raw_candidates = list(allowed_list)
-                else:
-                    # 未多选时，按价格+库存排序
-                    self.log("🔍 自动选号（未指定允许国家，按全平台价格+库存挑最优）...")
-                    try:
-                        rows = provider.get_top_countries(service=self.service)
-                        min_stock = _safe_int(self.config.get("sms_auto_min_stock"), 20)
-                        max_price = _safe_float(self.config.get("sms_auto_max_price"), 0)
-                        strict_whitelist = _safe_bool(self.config.get("sms_strict_whitelist"), False)
-
-                        def _qualifies(row: dict, stock_threshold: int) -> bool:
-                            cid = str(row.get("country") or "")
-                            if strict_whitelist and cid not in OPENAI_SMS_COUNTRIES:
-                                return False
-                            if max_price > 0 and (row.get("price") or 0) > max_price:
-                                return False
-                            return (row.get("count") or 0) >= stock_threshold
-
-                        # 先按正常库存阈值
-                        raw_candidates = [str(r["country"]) for r in rows if _qualifies(r, min_stock)]
-                        if not raw_candidates:
-                            raw_candidates = [str(r["country"]) for r in rows if _qualifies(r, 1)]
-                        if raw_candidates:
-                            labels = []
-                            for cid in raw_candidates[:5]:
-                                name = SMS_COUNTRY_NAMES_CN.get(cid, "未知")
-                                wl = "✅白名单" if cid in OPENAI_SMS_COUNTRIES else "⚠️非白名单"
-                                labels.append(f"{cid} {name}[{wl}]")
-                            self.log(f"✅ 自动选择国家候选: {' > '.join(labels)}{' ...' if len(raw_candidates) > 5 else ''}")
-                        else:
-                            self.log("⚠️ 未找到满足条件的国家，使用默认 country")
-                            raw_candidates = [self.country] if self.country else []
-                    except Exception as e:
-                        self.log(f"⚠️ 国家智能选择失败({e})，使用默认 country")
-                        raw_candidates = [self.country] if self.country else []
-            else:
-                # 没启用自动选号 → 默认国家；若该国已达上限且勾了允许列表，则改用允许列表
-                if self.country and self.country not in exhausted:
-                    raw_candidates = [self.country]
-                elif allowed_list:
-                    self.log("🔁 默认国家已达单国上限，改从「允许的国家」里选")
+        if self.auto_select_country and isinstance(provider, SmsBowerProvider):
+            if allowed_list:
+                self.log(f"🔍 自动选号: 从主人勾选的 {len(allowed_list)} 个国家依次尝试（按价格升序）")
+                try:
+                    rows = provider.get_top_countries(service=self.service)
+                    # 按价格升序排，只保留在 allowed_list 中的
+                    in_allow = [r for r in rows if str(r.get("country") or "") in allowed_list]
+                    ordered_allowed = [str(r["country"]) for r in in_allow]
+                    # 把 allowed 里没在排名中出现的也加在最后
+                    appended = [c for c in allowed_list if c not in ordered_allowed]
+                    raw_candidates = ordered_allowed + appended
+                    self.log(f"  候选顺序: {','.join(raw_candidates)}")
+                except Exception as e:
+                    self.log(f"  排名查询失败({e})，按主人勾选的原始顺序尝试")
                     raw_candidates = list(allowed_list)
-                else:
+            else:
+                # 未多选时，按价格+库存排序
+                self.log("🔍 自动选号（未指定允许国家，按全平台价格+库存挑最优）...")
+                try:
+                    rows = provider.get_top_countries(service=self.service)
+                    min_stock = _safe_int(self.config.get("sms_auto_min_stock"), 20)
+                    max_price = _safe_float(self.config.get("sms_auto_max_price"), 0)
+                    strict_whitelist = _safe_bool(self.config.get("sms_strict_whitelist"), False)
+
+                    def _qualifies(row: dict, stock_threshold: int) -> bool:
+                        cid = str(row.get("country") or "")
+                        if strict_whitelist and cid not in OPENAI_SMS_COUNTRIES:
+                            return False
+                        if max_price > 0 and (row.get("price") or 0) > max_price:
+                            return False
+                        return (row.get("count") or 0) >= stock_threshold
+
+                    # 先按正常库存阈值
+                    raw_candidates = [str(r["country"]) for r in rows if _qualifies(r, min_stock)]
+                    if not raw_candidates:
+                        raw_candidates = [str(r["country"]) for r in rows if _qualifies(r, 1)]
+                    if raw_candidates:
+                        labels = []
+                        for cid in raw_candidates[:5]:
+                            name = SMS_COUNTRY_NAMES_CN.get(cid, "未知")
+                            wl = "✅白名单" if cid in OPENAI_SMS_COUNTRIES else "⚠️非白名单"
+                            labels.append(f"{cid} {name}[{wl}]")
+                        self.log(f"✅ 自动选择国家候选: {' > '.join(labels)}{' ...' if len(raw_candidates) > 5 else ''}")
+                    else:
+                        self.log("⚠️ 未找到满足条件的国家，使用默认 country")
+                        raw_candidates = [self.country] if self.country else []
+                except Exception as e:
+                    self.log(f"⚠️ 国家智能选择失败({e})，使用默认 country")
                     raw_candidates = [self.country] if self.country else []
+        else:
+            # 没启用自动选号 → 默认国家；若该国已达上限且勾了允许列表，则改用允许列表
+            if self.country and self.country not in exhausted:
+                raw_candidates = [self.country]
+            elif allowed_list:
+                self.log("🔁 默认国家已达单国上限，改从「允许的国家」里选")
+                raw_candidates = list(allowed_list)
+            else:
+                raw_candidates = [self.country] if self.country else []
 
         country_candidates = self._filter_country_limit(raw_candidates)
         if not country_candidates:

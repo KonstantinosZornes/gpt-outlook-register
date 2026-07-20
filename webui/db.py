@@ -957,7 +957,6 @@ def get_sms_config() -> dict:
         "sms_reuse_phone":         get_setting("sms_reuse_phone", "0"),
         "sms_phone_success_max":   get_setting("sms_phone_success_max", "3"),
         "sms_auto_country":        get_setting("sms_auto_country", "0"),
-        "sms_keep_country":        get_setting("sms_keep_country", "0"),
         "sms_strict_whitelist":    get_setting("sms_strict_whitelist", "0"),
         "sms_allowed_countries":   get_setting("sms_allowed_countries", ""),
         "sms_auto_min_stock":      get_setting("sms_auto_min_stock", "20"),
@@ -990,7 +989,7 @@ def save_sms_config(data: dict) -> None:
         if key in data:
             set_setting(key, str(data[key]).strip())
     # 布尔字段（前端传 '0'/'1' 或 bool）
-    for key in ("sms_enabled", "sms_reuse_phone", "sms_auto_country", "sms_keep_country", "sms_strict_whitelist"):
+    for key in ("sms_enabled", "sms_reuse_phone", "sms_auto_country", "sms_strict_whitelist"):
         if key in data:
             v = data[key]
             if isinstance(v, bool):
@@ -1022,7 +1021,6 @@ def get_sms_internal_config() -> dict:
         "sms_reuse_phone":         get_setting("sms_reuse_phone", "0") in ("1", "true"),
         "sms_phone_success_max":   get_setting("sms_phone_success_max", "3"),
         "sms_auto_country":        get_setting("sms_auto_country", "0") in ("1", "true"),
-        "sms_keep_country":        get_setting("sms_keep_country", "0") in ("1", "true"),
         "sms_strict_whitelist":    get_setting("sms_strict_whitelist", "0") in ("1", "true"),
         "sms_allowed_countries":   get_setting("sms_allowed_countries", ""),
         "sms_auto_min_stock":      get_setting("sms_auto_min_stock", "20"),

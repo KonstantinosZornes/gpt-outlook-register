@@ -512,7 +512,6 @@ def _build_sms_callback(run_id: str, email_ref: Optional[dict] = None) -> Option
             country=cfg.get("sms_country") or "52",
             log_fn=_log,
             auto_select_country=bool(cfg.get("sms_auto_country")),
-            keep_country=bool(cfg.get("sms_keep_country")),
         )
     except Exception as e:
         smslog.warning(f"[sms] 创建接码 controller 失败: {e}")

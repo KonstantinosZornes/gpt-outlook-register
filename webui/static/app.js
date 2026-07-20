@@ -1267,7 +1267,6 @@ async function loadSmsConfig() {
     $("#smsPhoneSuccessMax").value = config.sms_phone_success_max || "3";
     $("#smsReusePhone").checked = config.sms_reuse_phone === "1";
     $("#smsAutoCountry").checked = config.sms_auto_country === "1";
-    $("#smsKeepCountry").checked = config.sms_keep_country === "1";
     $("#smsAutoMinStock").value = config.sms_auto_min_stock || "20";
     $("#smsAutoMaxPrice").value = config.sms_auto_max_price || "";
     _renderSmsAllowedCountriesBox(config.sms_allowed_countries || "");
@@ -1334,7 +1333,6 @@ $("#btnSaveSmsCfg").addEventListener("click", async () => {
     sms_phone_success_max: $("#smsPhoneSuccessMax").value.trim() || "3",
     sms_reuse_phone:       $("#smsReusePhone").checked ? "1" : "0",
     sms_auto_country:      $("#smsAutoCountry").checked ? "1" : "0",
-    sms_keep_country:      $("#smsKeepCountry").checked ? "1" : "0",
     sms_allowed_countries: _getAllowedCountriesValue(),
     sms_auto_min_stock:    $("#smsAutoMinStock").value.trim() || "20",
     sms_auto_max_price:    $("#smsAutoMaxPrice").value.trim(),
