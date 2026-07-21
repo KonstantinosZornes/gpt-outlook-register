@@ -471,12 +471,15 @@ def api_get_sms_config():
 
 @app.get("/api/sms_stats")
 def api_sms_stats():
-    from sms_provider import SMS_COUNTRY_NAMES_CN
+    from sms_provider import FIVESIM_COUNTRY_NAMES_CN, SMS_COUNTRY_NAMES_CN
 
     items = []
     for row in db.list_sms_stats():
         country = str(row.get("country") or "")
-        country_name = SMS_COUNTRY_NAMES_CN.get(country, "")
+        country_name = (
+            SMS_COUNTRY_NAMES_CN.get(country)
+            or FIVESIM_COUNTRY_NAMES_CN.get(country.lower(), "")
+        )
         items.append({
             **row,
             "country_name": country_name,
@@ -488,7 +491,7 @@ def api_sms_stats():
 @app.get("/api/sms_exhausted")
 def api_sms_exhausted(provider: str = ""):
     """列出持久化的不可用国家。query provider 可选，空=全部供应商。"""
-    from sms_provider import SMS_COUNTRY_NAMES_CN, list_exhausted_countries
+    from sms_provider import FIVESIM_COUNTRY_NAMES_CN, SMS_COUNTRY_NAMES_CN, list_exhausted_countries
 
     pk = (provider or "").strip().lower() or None
     # 确保内存缓存已加载（与 DB 对齐）
@@ -496,7 +499,10 @@ def api_sms_exhausted(provider: str = ""):
     items = []
     for row in db.list_sms_exhausted_countries(pk):
         country = str(row.get("country") or "")
-        name = SMS_COUNTRY_NAMES_CN.get(country, "")
+        name = (
+            SMS_COUNTRY_NAMES_CN.get(country)
+            or FIVESIM_COUNTRY_NAMES_CN.get(country.lower(), "")
+        )
         items.append({
             **row,
             "country_name": name,
@@ -520,11 +526,12 @@ def api_sms_exhausted_clear(country: str = "", provider: str = ""):
 
 class SaveSmsConfigReq(BaseModel):
     sms_enabled: Optional[str] = None              # "0" / "1"
-    sms_provider: Optional[str] = None             # smsbower / herosms
+    sms_provider: Optional[str] = None             # smsbower / herosms / 5sim
     smsbower_api_key: Optional[str] = None         # 传 '***' 表示不修改
     herosms_api_key: Optional[str] = None          # 传 '***' 表示不修改
-    sms_country: Optional[str] = None              # ID 或国家代码（'52' / 'th'）
-    sms_service: Optional[str] = None              # OpenAI = 'dr'
+    fivesim_api_key: Optional[str] = None          # 传 '***' 表示不修改
+    sms_country: Optional[str] = None              # ID 或国家 slug（'52' / 'thailand'）
+    sms_service: Optional[str] = None              # sms-activate: 'dr'；5sim: 'openai'
     sms_max_price: Optional[str] = None
     sms_reuse_phone: Optional[str] = None
     sms_phone_success_max: Optional[str] = None
@@ -547,19 +554,22 @@ def api_save_sms_config(req: SaveSmsConfigReq):
 
 
 class TestSmsReq(BaseModel):
-    provider: Optional[str] = Field(None, description="smsbower / herosms；不传 = 用当前选中的 provider")
+    provider: Optional[str] = Field(None, description="smsbower / herosms / 5sim；不传 = 用当前选中的 provider")
 
 
 @app.post("/api/settings/sms/test")
 def api_test_sms(req: TestSmsReq):
     """测试指定 SMS provider 连通性：查询余额。"""
     target = (req.provider or db.get_setting("sms_provider", "smsbower")).strip().lower()
-    if target not in ("smsbower", "herosms"):
+    if target == "fivesim":
+        target = "5sim"
+    if target not in ("smsbower", "herosms", "5sim"):
         raise HTTPException(400, f"未知 provider: {target}")
 
-    api_key = db.get_setting(f"{target}_api_key", "").strip()
+    key_name = "fivesim_api_key" if target == "5sim" else f"{target}_api_key"
+    api_key = db.get_setting(key_name, "").strip()
     if not api_key:
-        raise HTTPException(400, f"未配置 {target}_api_key")
+        raise HTTPException(400, f"未配置 {key_name}")
 
     cfg = {
         "sms_provider": target,
@@ -590,26 +600,42 @@ def api_test_sms(req: TestSmsReq):
 
 @app.get("/api/settings/sms/countries")
 def api_sms_top_countries():
-    """查询 SmsBower / HeroSMS 的国家排名（价格 + 库存）。"""
+    """查询当前接码平台的国家排名（价格 + 库存）。"""
     cfg = db.get_sms_internal_config()
     if not cfg.get("sms_api_key"):
         raise HTTPException(400, "未配置 sms_api_key")
-    if cfg["sms_provider"] not in ("smsbower", "herosms"):
+    if cfg["sms_provider"] not in ("smsbower", "herosms", "5sim", "fivesim"):
         return {"ok": True, "countries": [], "message": "当前 provider 不支持国家排名查询"}
 
     import sys as _sys
     ROOT_DIR = Path(__file__).resolve().parents[1]
     if str(ROOT_DIR) not in _sys.path:
         _sys.path.insert(0, str(ROOT_DIR))
-    from sms_provider import create_sms_provider, OPENAI_SMS_COUNTRIES, SMS_COUNTRY_NAMES_CN
+    from sms_provider import (
+        FIVESIM_COUNTRY_NAMES_CN,
+        FIVESIM_DEFAULT_SERVICE,
+        OPENAI_SMS_COUNTRIES,
+        OPENAI_SMS_COUNTRIES_FIVESIM,
+        SMS_COUNTRY_NAMES_CN,
+        create_sms_provider,
+    )
     try:
-        provider = create_sms_provider(cfg["sms_provider"], cfg)
-        rows = provider.get_top_countries(service=cfg.get("sms_service") or "dr")
+        pk = cfg["sms_provider"]
+        is_5sim = pk in ("5sim", "fivesim")
+        svc = cfg.get("sms_service") or (FIVESIM_DEFAULT_SERVICE if is_5sim else "dr")
+        if is_5sim and svc in ("dr", "openai_sms", "chatgpt"):
+            svc = FIVESIM_DEFAULT_SERVICE
+        provider = create_sms_provider(pk, cfg)
+        rows = provider.get_top_countries(service=svc)
+        safe = OPENAI_SMS_COUNTRIES_FIVESIM if is_5sim else OPENAI_SMS_COUNTRIES
         for r in rows:
             cid = str(r.get("country"))
-            r["openai_sms_safe"] = cid in OPENAI_SMS_COUNTRIES
-            r["name_cn"] = SMS_COUNTRY_NAMES_CN.get(cid, "未知")
-        return {"ok": True, "countries": rows[:30], "openai_sms_safe": list(OPENAI_SMS_COUNTRIES)}
+            r["openai_sms_safe"] = cid in safe
+            r["name_cn"] = (
+                SMS_COUNTRY_NAMES_CN.get(cid)
+                or FIVESIM_COUNTRY_NAMES_CN.get(cid.lower(), "未知")
+            )
+        return {"ok": True, "countries": rows[:30], "openai_sms_safe": list(safe)}
     except Exception as e:
         raise HTTPException(500, f"查询失败: {e}")
 
@@ -621,41 +647,71 @@ def api_sms_all_countries(provider: str = ""):
     ROOT_DIR = Path(__file__).resolve().parents[1]
     if str(ROOT_DIR) not in _sys.path:
         _sys.path.insert(0, str(ROOT_DIR))
-    from sms_provider import SMS_COUNTRY_NAMES_CN, OPENAI_SMS_COUNTRIES, create_sms_provider
+    from sms_provider import (
+        FIVESIM_COUNTRY_NAMES_CN,
+        FIVESIM_DEFAULT_SERVICE,
+        OPENAI_SMS_COUNTRIES,
+        OPENAI_SMS_COUNTRIES_FIVESIM,
+        SMS_COUNTRY_NAMES_CN,
+        create_sms_provider,
+    )
 
     cfg = db.get_sms_internal_config()
+    pk = (provider or cfg.get("sms_provider") or "smsbower").strip().lower()
+    if pk == "fivesim":
+        pk = "5sim"
     if provider:
-        cfg["sms_provider"] = provider
+        cfg["sms_provider"] = pk
+        # 切换 provider 时用对应 api key
+        if pk == "5sim":
+            cfg["sms_api_key"] = db.get_setting("fivesim_api_key", "")
+        elif pk == "herosms":
+            cfg["sms_api_key"] = db.get_setting("herosms_api_key", "")
+        else:
+            cfg["sms_api_key"] = db.get_setting("smsbower_api_key", "")
+
+    is_5sim = pk == "5sim"
+    safe = OPENAI_SMS_COUNTRIES_FIVESIM if is_5sim else OPENAI_SMS_COUNTRIES
+    svc = cfg.get("sms_service") or (FIVESIM_DEFAULT_SERVICE if is_5sim else "dr")
+    if is_5sim and svc in ("dr", "openai_sms", "chatgpt"):
+        svc = FIVESIM_DEFAULT_SERVICE
 
     # 尝试从平台 API 动态获取有库存的国家
     if cfg.get("sms_api_key"):
         try:
-            p = create_sms_provider(cfg["sms_provider"], cfg)
-            rows = p.get_top_countries(service=cfg.get("sms_service") or "dr")
+            p = create_sms_provider(pk, cfg)
+            rows = p.get_top_countries(service=svc)
             countries = []
             for r in rows:
                 cid = str(r.get("country") or "")
+                name = (
+                    SMS_COUNTRY_NAMES_CN.get(cid)
+                    or FIVESIM_COUNTRY_NAMES_CN.get(cid.lower(), f"国家{cid}")
+                )
                 countries.append({
                     "id": cid,
-                    "name_cn": SMS_COUNTRY_NAMES_CN.get(cid, f"国家{cid}"),
-                    "openai_sms_safe": cid in OPENAI_SMS_COUNTRIES,
+                    "name_cn": name,
+                    "openai_sms_safe": cid in safe,
                     "price": r.get("price"),
                     "count": r.get("count"),
                 })
             if countries:
                 return {"ok": True, "countries": countries,
-                        "openai_sms_safe": list(OPENAI_SMS_COUNTRIES), "source": "live"}
+                        "openai_sms_safe": list(safe), "source": "live"}
         except Exception:
             pass
 
     # fallback: 静态字典
-    items = sorted(SMS_COUNTRY_NAMES_CN.items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 9999)
+    if is_5sim:
+        items = sorted(FIVESIM_COUNTRY_NAMES_CN.items(), key=lambda kv: kv[0])
+    else:
+        items = sorted(SMS_COUNTRY_NAMES_CN.items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 9999)
     countries = [
-        {"id": cid, "name_cn": name, "openai_sms_safe": cid in OPENAI_SMS_COUNTRIES}
+        {"id": cid, "name_cn": name, "openai_sms_safe": cid in safe}
         for cid, name in items
     ]
     return {"ok": True, "countries": countries,
-            "openai_sms_safe": list(OPENAI_SMS_COUNTRIES), "source": "static"}
+            "openai_sms_safe": list(safe), "source": "static"}
 
 
 # ──────────────────────── 自动导出 (CPA / SUB2API) ────────────────────────

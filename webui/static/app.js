@@ -1278,9 +1278,15 @@ async function loadSmsConfig() {
     $("#herosmsApiKey").placeholder = (config.herosms_api_key === "***")
       ? "已设置（留空不修改）"
       : "粘贴 HeroSMS API Key";
+    $("#fivesimApiKey").value = "";
+    $("#fivesimApiKey").placeholder = (config.fivesim_api_key === "***")
+      ? "已设置（留空不修改）"
+      : "粘贴 5sim API Token";
 
-    _renderSmsCountrySelect($("#smsCountry"), config.sms_country || "150");
-    $("#smsService").value = config.sms_service || "dr";
+    const defaultCountry = provider === "5sim" ? "thailand" : "52";
+    const defaultService = provider === "5sim" ? "openai" : "dr";
+    _renderSmsCountrySelect($("#smsCountry"), config.sms_country || defaultCountry);
+    $("#smsService").value = config.sms_service || defaultService;
     $("#smsMaxPrice").value = config.sms_max_price || "";
     $("#smsPhoneSuccessMax").value = config.sms_phone_success_max || "3";
     $("#smsReusePhone").checked = config.sms_reuse_phone === "1";
@@ -1313,7 +1319,7 @@ $("#btnInvertAllowedCountries")?.addEventListener("click", () => {
   _updateAllowedCountryCount();
 });
 
-// 切换接码平台时重新加载国家列表
+// 切换接码平台时：重置国家/service，并清空不允许跨协议复用的允许列表
 document.querySelectorAll("input[name='smsProvider']").forEach(radio => {
   radio.addEventListener("change", async (e) => {
     const newProvider = e.target.value;
@@ -1322,8 +1328,16 @@ document.querySelectorAll("input[name='smsProvider']").forEach(radio => {
     const box = $("#smsAllowedCountriesBox");
     if (box) box.innerHTML = '<em style="grid-column:1/-1;color:#aaa;font-size:12px">加载中...</em>';
     await _loadSmsAllCountries(newProvider);
-    _renderSmsCountrySelect($("#smsCountry"), $("#smsCountry").value);
-    _renderSmsAllowedCountriesBox(_getAllowedCountriesValue());
+    const defaultCountry = newProvider === "5sim" ? "thailand" : "52";
+    const defaultService = newProvider === "5sim" ? "openai" : "dr";
+    const svcEl = $("#smsService");
+    if (svcEl) {
+      svcEl.value = defaultService;
+      svcEl.placeholder = defaultService;
+    }
+    _renderSmsCountrySelect($("#smsCountry"), defaultCountry);
+    // 数字 ID 与 5sim slug 不兼容，切换时清空允许列表避免误租/保存脏数据
+    _renderSmsAllowedCountriesBox("");
   });
 });
 
@@ -1340,13 +1354,17 @@ $("#btnClearAllowedCountries")?.addEventListener("click", () => {
 });
 
 $("#btnSaveSmsCfg").addEventListener("click", async () => {
+  const provider = document.querySelector("input[name='smsProvider']:checked")?.value || "smsbower";
+  const defaultCountry = provider === "5sim" ? "thailand" : "52";
+  const defaultService = provider === "5sim" ? "openai" : "dr";
   const body = {
     sms_enabled:           $("#smsEnabled").checked ? "1" : "0",
-    sms_provider:          document.querySelector("input[name='smsProvider']:checked")?.value || "smsbower",
+    sms_provider:          provider,
     smsbower_api_key:      $("#smsbowerApiKey").value.trim() || "***",
     herosms_api_key:       $("#herosmsApiKey").value.trim() || "***",
-    sms_country:           $("#smsCountry").value.trim() || "52",
-    sms_service:           $("#smsService").value.trim() || "dr",
+    fivesim_api_key:       $("#fivesimApiKey").value.trim() || "***",
+    sms_country:           $("#smsCountry").value.trim() || defaultCountry,
+    sms_service:           $("#smsService").value.trim() || defaultService,
     sms_max_price:         $("#smsMaxPrice").value.trim(),
     sms_phone_success_max: $("#smsPhoneSuccessMax").value.trim() || "3",
     sms_reuse_phone:       $("#smsReusePhone").checked ? "1" : "0",
@@ -1398,6 +1416,10 @@ $("#btnTestSmsbower").addEventListener("click", async (e) => {
 
 $("#btnTestHerosms").addEventListener("click", async (e) => {
   await _testSmsProvider("herosms", e.currentTarget, "🔌 测试 HeroSMS 余额");
+});
+
+$("#btnTest5sim")?.addEventListener("click", async (e) => {
+  await _testSmsProvider("5sim", e.currentTarget, "🔌 测试 5sim 余额");
 });
 
 // ──────────────────────── 📤 自动导出配置 (CPA / SUB2API) ────────────────────────

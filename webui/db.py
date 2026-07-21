@@ -968,13 +968,14 @@ def get_sms_config() -> dict:
     """返回 SMS 接码配置（api_key 隐藏明文）。
 
     sms_enabled:        '0'/'1' 是否启用接码（命中 add-phone 时才会用）
-    sms_provider:       smsbower / herosms
+    sms_provider:       smsbower / herosms / 5sim
     smsbower_api_key:   SmsBower API Key（已设置返回 '***'）
     herosms_api_key:    HeroSMS API Key（已设置返回 '***'）
-    sms_country:        国家代码或 ID（推荐 '52' = Thailand，OpenAI 走 SMS 的唯一稳定国家）
-    sms_service:        服务代码（OpenAI = 'dr'）
-    sms_max_price:      号码最高单价（SmsBower / HeroSMS 用，单位平台货币；空 / -1 = 不限）
-    sms_reuse_phone:    '0'/'1' 同号复用（SmsBower / HeroSMS 支持，省钱）
+    fivesim_api_key:    5sim API Token（已设置返回 '***'）
+    sms_country:        国家代码或 ID（sms-activate 用 '52'；5sim 用 'thailand'）
+    sms_service:        服务代码（sms-activate OpenAI = 'dr'；5sim = 'openai'）
+    sms_max_price:      号码最高单价（单位平台货币；空 / -1 = 不限）
+    sms_reuse_phone:    '0'/'1' 同号复用
     sms_phone_success_max: 同号最多复用几次（默认 3）
     sms_auto_country:   '0'/'1' 自动选最优国家（按价格 + 库存）
     sms_auto_min_stock: 自动选国家最低库存（默认 20）
@@ -985,6 +986,7 @@ def get_sms_config() -> dict:
         "sms_provider":            get_setting("sms_provider", "smsbower"),
         "smsbower_api_key":        "***" if get_setting("smsbower_api_key") else "",
         "herosms_api_key":         "***" if get_setting("herosms_api_key") else "",
+        "fivesim_api_key":         "***" if get_setting("fivesim_api_key") else "",
         "sms_country":             get_setting("sms_country", "52"),
         "sms_service":             get_setting("sms_service", "dr"),
         "sms_max_price":           get_setting("sms_max_price", ""),
@@ -1006,9 +1008,11 @@ def get_sms_config() -> dict:
 def save_sms_config(data: dict) -> None:
     """保存 SMS 配置。各 api_key 传 '***' 表示不修改。"""
     # 校验 provider
-    valid_providers = {"smsbower", "herosms"}
+    valid_providers = {"smsbower", "herosms", "5sim", "fivesim"}
     if "sms_provider" in data:
         p = str(data["sms_provider"]).strip().lower()
+        if p == "fivesim":
+            p = "5sim"
         if p not in valid_providers:
             p = "smsbower"
         set_setting("sms_provider", p)
@@ -1036,12 +1040,17 @@ def save_sms_config(data: dict) -> None:
         set_setting("smsbower_api_key", str(data["smsbower_api_key"]).strip())
     if data.get("herosms_api_key") and data["herosms_api_key"] != "***":
         set_setting("herosms_api_key", str(data["herosms_api_key"]).strip())
+    if data.get("fivesim_api_key") and data["fivesim_api_key"] != "***":
+        set_setting("fivesim_api_key", str(data["fivesim_api_key"]).strip())
 
 
 def get_sms_internal_config() -> dict:
     """内部用：拿明文 sms_api_key,供 sms_provider 实例化使用。"""
     provider = get_setting("sms_provider", "smsbower")
-    if provider == "herosms":
+    if provider in ("5sim", "fivesim"):
+        api_key = get_setting("fivesim_api_key", "")
+        provider = "5sim"
+    elif provider == "herosms":
         api_key = get_setting("herosms_api_key", "")
     else:
         api_key = get_setting("smsbower_api_key", "")

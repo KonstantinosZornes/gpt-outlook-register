@@ -134,9 +134,9 @@ SMS_COUNTRY_NAMES_CN: dict[str, str] = {
 
 
 def country_label(country_id) -> str:
-    """返回 '52 泰国' 这样的展示标签。"""
+    """返回展示标签：'52 泰国' 或 'thailand 泰国'。"""
     cid = str(country_id or "").strip()
-    name = SMS_COUNTRY_NAMES_CN.get(cid, "")
+    name = SMS_COUNTRY_NAMES_CN.get(cid) or FIVESIM_COUNTRY_NAMES_CN.get(cid.lower(), "")
     return f"{cid} {name}".strip()
 
 
@@ -993,6 +993,491 @@ class HeroSmsProvider(SmsBowerProvider):
 
 
 # ---------------------------------------------------------------------------
+# 5sim.net —— REST JSON + Bearer Token（协议与 sms-activate 系不同）
+# ---------------------------------------------------------------------------
+
+# 5sim 国家 slug → 中文名（guest/countries 的 text_en 对照）
+FIVESIM_COUNTRY_NAMES_CN: dict[str, str] = {
+    "afghanistan": "阿富汗", "albania": "阿尔巴尼亚", "algeria": "阿尔及利亚",
+    "angola": "安哥拉", "antiguaandbarbuda": "安提瓜和巴布达", "argentina": "阿根廷",
+    "armenia": "亚美尼亚", "aruba": "阿鲁巴", "australia": "澳大利亚", "austria": "奥地利",
+    "azerbaijan": "阿塞拜疆", "bahamas": "巴哈马", "bahrain": "巴林", "bangladesh": "孟加拉国",
+    "barbados": "巴巴多斯", "belgium": "比利时", "belize": "伯利兹", "benin": "贝宁",
+    "bhutane": "不丹", "bih": "波黑", "bolivia": "玻利维亚", "botswana": "博茨瓦纳",
+    "brazil": "巴西", "bulgaria": "保加利亚", "burkinafaso": "布基纳法索", "burundi": "布隆迪",
+    "cambodia": "柬埔寨", "cameroon": "喀麦隆", "canada": "加拿大", "capeverde": "佛得角",
+    "chad": "乍得", "chile": "智利", "colombia": "哥伦比亚", "comoros": "科摩罗",
+    "congo": "刚果", "costarica": "哥斯达黎加", "croatia": "克罗地亚", "cyprus": "塞浦路斯",
+    "czech": "捷克", "denmark": "丹麦", "djibouti": "吉布提", "dominicana": "多米尼加",
+    "easttimor": "东帝汶", "ecuador": "厄瓜多尔", "egypt": "埃及", "england": "英国",
+    "equatorialguinea": "赤道几内亚", "estonia": "爱沙尼亚", "ethiopia": "埃塞俄比亚",
+    "finland": "芬兰", "france": "法国", "frenchguiana": "法属圭亚那", "gabon": "加蓬",
+    "gambia": "冈比亚", "georgia": "格鲁吉亚", "germany": "德国", "ghana": "加纳",
+    "greece": "希腊", "guadeloupe": "瓜德罗普", "guatemala": "危地马拉", "guinea": "几内亚",
+    "guineabissau": "几内亚比绍", "guyana": "圭亚那", "haiti": "海地", "honduras": "洪都拉斯",
+    "hongkong": "香港", "hungary": "匈牙利", "india": "印度", "indonesia": "印度尼西亚",
+    "ireland": "爱尔兰", "israel": "以色列", "italy": "意大利", "ivorycoast": "科特迪瓦",
+    "jamaica": "牙买加", "jordan": "约旦", "kazakhstan": "哈萨克斯坦", "kenya": "肯尼亚",
+    "kuwait": "科威特", "kyrgyzstan": "吉尔吉斯斯坦", "laos": "老挝", "latvia": "拉脱维亚",
+    "lesotho": "莱索托", "liberia": "利比里亚", "lithuania": "立陶宛", "luxembourg": "卢森堡",
+    "macau": "澳门", "madagascar": "马达加斯加", "malawi": "马拉维", "malaysia": "马来西亚",
+    "maldives": "马尔代夫", "mauritania": "毛里塔尼亚", "mauritius": "毛里求斯", "mexico": "墨西哥",
+    "moldova": "摩尔多瓦", "mongolia": "蒙古", "montenegro": "黑山", "morocco": "摩洛哥",
+    "mozambique": "莫桑比克", "namibia": "纳米比亚", "nepal": "尼泊尔", "netherlands": "荷兰",
+    "newcaledonia": "新喀里多尼亚", "nicaragua": "尼加拉瓜", "nigeria": "尼日利亚",
+    "northmacedonia": "北马其顿", "norway": "挪威", "oman": "阿曼", "pakistan": "巴基斯坦",
+    "panama": "巴拿马", "papuanewguinea": "巴布亚新几内亚", "paraguay": "巴拉圭", "peru": "秘鲁",
+    "philippines": "菲律宾", "poland": "波兰", "portugal": "葡萄牙", "puertorico": "波多黎各",
+    "reunion": "留尼汪", "romania": "罗马尼亚", "russia": "俄罗斯", "rwanda": "卢旺达",
+    "saintkittsandnevis": "圣基茨和尼维斯", "saintlucia": "圣卢西亚",
+    "saintvincentandgrenadines": "圣文森特", "salvador": "萨尔瓦多", "samoa": "萨摩亚",
+    "saudiarabia": "沙特阿拉伯", "senegal": "塞内加尔", "serbia": "塞尔维亚",
+    "seychelles": "塞舌尔", "sierraleone": "塞拉利昂", "slovakia": "斯洛伐克",
+    "slovenia": "斯洛文尼亚", "solomonislands": "所罗门群岛", "southafrica": "南非",
+    "spain": "西班牙", "srilanka": "斯里兰卡", "suriname": "苏里南", "swaziland": "斯威士兰",
+    "sweden": "瑞典", "taiwan": "台湾", "tajikistan": "塔吉克斯坦", "tanzania": "坦桑尼亚",
+    "thailand": "泰国", "tit": "特立尼达和多巴哥", "togo": "多哥", "tunisia": "突尼斯",
+    "turkmenistan": "土库曼斯坦", "uganda": "乌干达", "ukraine": "乌克兰",
+    "unitedarabemirates": "阿联酋", "uruguay": "乌拉圭", "usa": "美国",
+    "uzbekistan": "乌兹别克斯坦", "venezuela": "委内瑞拉", "vietnam": "越南", "zambia": "赞比亚",
+}
+
+# sms-activate 数字 ID → 5sim 国家 slug（便于沿用旧配置）
+_SMS_ID_TO_FIVESIM: dict[str, str] = {
+    "0": "russia", "1": "ukraine", "2": "kazakhstan", "4": "philippines",
+    "6": "indonesia", "7": "malaysia", "8": "kenya", "9": "tanzania",
+    "10": "vietnam", "11": "kyrgyzstan", "13": "israel", "14": "hongkong",
+    "15": "poland", "16": "england", "19": "nigeria", "20": "macau",
+    "21": "egypt", "22": "india", "23": "ireland", "24": "cambodia",
+    "25": "laos", "26": "haiti", "27": "ivorycoast", "28": "gambia",
+    "29": "serbia", "31": "southafrica", "32": "romania", "33": "colombia",
+    "34": "estonia", "35": "azerbaijan", "36": "canada", "37": "morocco",
+    "38": "ghana", "39": "argentina", "40": "uzbekistan", "41": "cameroon",
+    "42": "chad", "43": "germany", "44": "lithuania", "45": "croatia",
+    "46": "sweden", "48": "netherlands", "49": "latvia", "50": "austria",
+    "52": "thailand", "53": "saudiarabia", "54": "mexico", "55": "taiwan",
+    "56": "spain", "58": "algeria", "59": "slovenia", "60": "bangladesh",
+    "61": "senegal", "63": "czech", "64": "srilanka", "65": "peru",
+    "66": "pakistan", "68": "guinea", "70": "venezuela", "71": "ethiopia",
+    "72": "mongolia", "73": "brazil", "75": "uganda", "76": "angola",
+    "77": "cyprus", "78": "france", "79": "papuanewguinea", "80": "mozambique",
+    "81": "nepal", "82": "belgium", "83": "bulgaria", "84": "hungary",
+    "85": "moldova", "86": "italy", "87": "paraguay", "88": "honduras",
+    "89": "tunisia", "90": "nicaragua", "91": "easttimor", "92": "bolivia",
+    "93": "costarica", "94": "guatemala", "95": "unitedarabemirates",
+    "97": "puertorico", "99": "togo", "100": "kuwait", "101": "salvador",
+    "103": "jamaica", "104": "tit", "105": "ecuador", "106": "swaziland",
+    "107": "oman", "108": "bih", "109": "dominicana", "112": "panama",
+    "114": "mauritania", "115": "sierraleone", "116": "jordan", "117": "portugal",
+    "118": "barbados", "119": "burundi", "120": "benin", "122": "bahamas",
+    "123": "botswana", "124": "belize", "128": "georgia", "129": "greece",
+    "130": "guineabissau", "131": "guyana", "133": "comoros", "134": "liberia",
+    "135": "lesotho", "136": "malawi", "137": "namibia", "139": "rwanda",
+    "140": "slovakia", "141": "suriname", "142": "tajikistan", "144": "bahrain",
+    "145": "reunion", "146": "zambia", "147": "armenia", "149": "congo",
+    "150": "chile", "151": "burkinafaso", "153": "gabon", "154": "albania",
+    "155": "uruguay", "156": "mauritius", "157": "bhutane", "158": "maldives",
+    "159": "guadeloupe", "160": "turkmenistan", "161": "frenchguiana",
+    "162": "finland", "163": "saintlucia", "164": "luxembourg",
+    "165": "saintvincentandgrenadines", "166": "equatorialguinea", "167": "djibouti",
+    "170": "montenegro", "171": "denmark", "173": "norway", "174": "australia",
+    "181": "northmacedonia", "182": "seychelles", "183": "newcaledonia",
+    "184": "capeverde", "187": "usa", "190": "ivorycoast",
+}
+
+FIVESIM_DEFAULT_SERVICE = "openai"
+FIVESIM_DEFAULT_COUNTRY = "thailand"
+# OpenAI 纯 SMS 在 5sim 国家 slug 下的白名单
+OPENAI_SMS_COUNTRIES_FIVESIM = {"thailand"}
+
+
+def _fivesim_norm_country(country: str) -> str:
+    """把 sms-activate 数字 ID 或混合写法规范成 5sim 国家 slug。"""
+    c = str(country or "").strip().lower()
+    if not c:
+        return FIVESIM_DEFAULT_COUNTRY
+    if c.isdigit():
+        return _SMS_ID_TO_FIVESIM.get(c, c)
+    return c.replace(" ", "").replace("_", "").replace("-", "")
+
+
+class FiveSimProvider(BaseSmsProvider):
+    """5sim.net REST API 接码 provider。
+
+    Auth: Authorization: Bearer <token>
+    租号: GET /v1/user/buy/activation/{country}/{operator}/{product}
+    查码: GET /v1/user/check/{id}
+    完成: GET /v1/user/finish/{id}
+    取消: GET /v1/user/cancel/{id}
+    拒号: GET /v1/user/ban/{id}
+    """
+
+    provider_name = "5sim"
+    DEFAULT_BASE_URL = "https://5sim.net"
+    auto_report_success_on_code = False
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = "",
+        default_service: str = FIVESIM_DEFAULT_SERVICE,
+        default_country: str = FIVESIM_DEFAULT_COUNTRY,
+        max_price: float = -1,
+        proxy: Optional[str] = None,
+        reuse_phone_to_max: bool = False,
+        phone_success_max: int = 0,
+        operator: str = "any",
+    ):
+        self.api_key = str(api_key or "").strip()
+        self.base_url = (str(base_url or "").strip() or self.DEFAULT_BASE_URL).rstrip("/")
+        svc = str(default_service or "").strip()
+        # 兼容旧配置：sms-activate 的 dr → 5sim 的 openai
+        if not svc or svc in ("dr", "openai_sms", "chatgpt"):
+            svc = FIVESIM_DEFAULT_SERVICE
+        self.default_service = svc
+        self.default_country = _fivesim_norm_country(default_country or FIVESIM_DEFAULT_COUNTRY)
+        self.max_price = float(max_price or -1)
+        self._proxy = (proxy or "").strip() or None
+        self._proxies = {"http": self._proxy, "https": self._proxy} if self._proxy else None
+        self.operator = str(operator or "any").strip() or "any"
+        self.reuse_phone_to_max = bool(reuse_phone_to_max)
+        self.phone_success_max = max(0, int(phone_success_max or 0))
+        self._resend_callback: Optional[Callable[[], None]] = None
+        self.last_code_result: Optional[dict] = None
+        self.current_activation: Optional[SmsActivation] = None
+        self._used_codes: set[str] = set()
+
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+        }
+
+    def _get(self, path: str, *, params: Optional[dict] = None, auth: bool = True,
+             timeout: int = 30) -> requests.Response:
+        url = f"{self.base_url}{path}"
+        headers = self._headers() if auth else {"Accept": "application/json"}
+        resp = requests.get(url, headers=headers, params=params, timeout=timeout, proxies=self._proxies)
+        return resp
+
+    @staticmethod
+    def _raise_if_error(resp: requests.Response, action: str) -> dict | str:
+        text = (resp.text or "").strip()
+        if resp.status_code == 401:
+            raise RuntimeError(f"5sim {action} 鉴权失败: 检查 API Token")
+        if resp.status_code >= 500:
+            raise RuntimeError(f"5sim {action} 服务端错误: {resp.status_code} {text[:200]}")
+        # 业务错误常以 200 + 纯文本 "no free phones" 等形式返回
+        if text and not text.startswith("{") and not text.startswith("["):
+            low = text.lower()
+            if any(x in low for x in (
+                "no free", "not enough", "bad country", "bad operator",
+                "no product", "server offline", "order not found", "order expired",
+                "order has sms", "hosting order",
+            )):
+                raise RuntimeError(f"5sim {action}: {text[:200]}")
+        try:
+            data = resp.json()
+        except ValueError:
+            if resp.status_code >= 400:
+                raise RuntimeError(f"5sim {action} HTTP {resp.status_code}: {text[:200]}")
+            return text
+        if resp.status_code >= 400:
+            raise RuntimeError(f"5sim {action} HTTP {resp.status_code}: {text[:200]}")
+        return data
+
+    def get_balance(self) -> float:
+        resp = self._get("/v1/user/profile")
+        data = self._raise_if_error(resp, "profile")
+        if not isinstance(data, dict):
+            raise RuntimeError(f"5sim profile 返回异常: {data}")
+        return float(data.get("balance") or 0)
+
+    def get_top_countries(self, service: Optional[str] = None) -> list[dict]:
+        """按 product 查全站价格，汇总各国最低价 + 总库存。"""
+        product = str(service or self.default_service or FIVESIM_DEFAULT_SERVICE).strip()
+        # 与 get_number 一致：sms-activate 的 dr 等别名映射到 openai
+        if not product or product in ("dr", "openai_sms", "chatgpt"):
+            product = FIVESIM_DEFAULT_SERVICE
+        try:
+            resp = self._get("/v1/guest/prices", params={"product": product}, auth=False, timeout=45)
+            data = self._raise_if_error(resp, "prices")
+        except Exception as exc:
+            logger.warning("5sim get_top_countries 失败: %s", exc)
+            return []
+        if not isinstance(data, dict):
+            return []
+
+        rows: list[dict] = []
+        # 两种结构：{country: {product: {op: {cost,count}}}} 或 {product: {country: {op:...}}}
+        def _iter_country_ops(payload: dict):
+            # 若顶层 key 就是 product
+            if product in payload and isinstance(payload[product], dict):
+                for country, ops in payload[product].items():
+                    if isinstance(ops, dict):
+                        yield str(country), ops
+                return
+            for country, products in payload.items():
+                if not isinstance(products, dict):
+                    continue
+                ops = products.get(product)
+                if isinstance(ops, dict):
+                    yield str(country), ops
+
+        for country, ops in _iter_country_ops(data):
+            best_price = None
+            total_count = 0
+            for op_name, info in ops.items():
+                if not isinstance(info, dict):
+                    continue
+                cost = info.get("cost")
+                count = info.get("count") or 0
+                try:
+                    cost_f = float(cost) if cost is not None else None
+                except (TypeError, ValueError):
+                    cost_f = None
+                try:
+                    count_i = int(count)
+                except (TypeError, ValueError):
+                    count_i = 0
+                total_count += max(0, count_i)
+                if cost_f is not None and (best_price is None or cost_f < best_price):
+                    best_price = cost_f
+            if best_price is not None:
+                rows.append({
+                    "country": country.lower(),
+                    "price": best_price,
+                    "count": total_count,
+                })
+        rows.sort(key=lambda r: (r.get("price") or 999, -(r.get("count") or 0)))
+        return rows
+
+    def get_best_country(self, service: Optional[str] = None, *,
+                         min_stock: int = 20, max_price: float = 0,
+                         strict_whitelist: bool = False,
+                         allowed_countries: Optional[list[str]] = None) -> Optional[str]:
+        try:
+            rows = self.get_top_countries(service=service)
+        except Exception as exc:
+            logger.warning("5sim get_best_country 失败: %s", exc)
+            return None
+        if not rows:
+            return None
+        allowed_set: Optional[set[str]] = None
+        if allowed_countries:
+            allowed_set = {_fivesim_norm_country(c) for c in allowed_countries if str(c).strip()}
+
+        def _pick(stock_threshold: int) -> Optional[str]:
+            for row in rows:
+                cid = str(row.get("country") or "")
+                if allowed_set is not None and cid not in allowed_set:
+                    continue
+                if strict_whitelist and cid not in OPENAI_SMS_COUNTRIES_FIVESIM:
+                    continue
+                price = row.get("price") or 0
+                count = row.get("count") or 0
+                if count < stock_threshold:
+                    continue
+                if max_price > 0 and price > max_price:
+                    continue
+                return cid
+            return None
+
+        return _pick(min_stock) or _pick(1)
+
+    def _buy_one(self, country: str, product: str) -> SmsActivation:
+        country = _fivesim_norm_country(country)
+        path = f"/v1/user/buy/activation/{country}/{self.operator}/{product}"
+        params = {}
+        if self.max_price > 0 and self.operator == "any":
+            params["maxPrice"] = self.max_price
+        if self.reuse_phone_to_max:
+            params["reuse"] = "1"
+        logger.info("5sim buy: country=%s operator=%s product=%s maxPrice=%s",
+                    country, self.operator, product, params.get("maxPrice", "未设置"))
+        resp = self._get(path, params=params or None)
+        # 200 + "no free phones" 等
+        text = (resp.text or "").strip()
+        if text and not text.startswith("{"):
+            raise RuntimeError(f"5sim buy {country}: {text[:200]}")
+        data = self._raise_if_error(resp, f"buy:{country}")
+        if not isinstance(data, dict) or not data.get("id"):
+            raise RuntimeError(f"5sim buy 返回异常: {text[:200]}")
+        phone = str(data.get("phone") or "").strip()
+        if phone and not phone.startswith("+"):
+            phone = f"+{phone}"
+        aid = str(data["id"])
+        activation = SmsActivation(
+            activation_id=aid,
+            phone_number=phone,
+            country=str(data.get("country") or country),
+            metadata={
+                "reused": False,
+                "price": data.get("price"),
+                "operator": data.get("operator"),
+                "product": data.get("product") or product,
+            },
+        )
+        self.current_activation = activation
+        self._used_codes.clear()
+        logger.info("5sim 租到号 %s id=%s country=%s", phone, aid, activation.country)
+        return activation
+
+    def get_number(self, *, service: str, country: str = "",
+                    country_candidates: Optional[list[str]] = None) -> SmsActivation:
+        product = str(service or self.default_service or FIVESIM_DEFAULT_SERVICE).strip()
+        if product in ("dr", "openai_sms", "chatgpt"):
+            product = FIVESIM_DEFAULT_SERVICE
+        if not country_candidates:
+            country_candidates = [
+                _fivesim_norm_country(country or self.default_country or FIVESIM_DEFAULT_COUNTRY)
+            ]
+        else:
+            country_candidates = [_fivesim_norm_country(c) for c in country_candidates if str(c).strip()]
+
+        failures: list[str] = []
+        last_exc: Optional[Exception] = None
+        for cid in country_candidates:
+            try:
+                return self._buy_one(cid, product)
+            except Exception as e:
+                failures.append(f"{cid}: {str(e)[:120]}")
+                last_exc = e
+                continue
+        detail = " | ".join(failures) if failures else "未知"
+        raise RuntimeError(
+            f"5sim 依次尝试 {len(country_candidates)} 个候选国家全失败: {detail}"
+        ) from last_exc
+
+    def _extract_code(self, data: dict) -> Optional[str]:
+        if not isinstance(data, dict):
+            return None
+        sms_list = data.get("sms")
+        if isinstance(sms_list, list):
+            for item in reversed(sms_list):
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("code") or "").strip()
+                if code and code not in self._used_codes:
+                    return code
+        status = str(data.get("status") or "").upper()
+        if status in ("CANCELED", "CANCELLED", "BANNED", "TIMEOUT", "FINISHED"):
+            return None
+        return None
+
+    def get_code(self, activation_id: str, *, timeout: int = 180,
+                 resend_interval: Optional[int] = None,
+                 resend_max: Optional[int] = None) -> str:
+        deadline = time.time() + timeout
+        start = time.time()
+        openai_resend_interval = resend_interval if resend_interval is not None else 20
+        openai_resend_max = resend_max if resend_max is not None else 3
+        openai_resend_count = 0
+        poll = 3
+        while time.time() < deadline:
+            try:
+                resp = self._get(f"/v1/user/check/{activation_id}")
+                data = self._raise_if_error(resp, "check")
+                if isinstance(data, dict):
+                    status = str(data.get("status") or "").upper()
+                    if status in ("CANCELED", "CANCELLED", "BANNED", "TIMEOUT"):
+                        self.last_code_result = None
+                        return ""
+                    code = self._extract_code(data)
+                    if code:
+                        self.last_code_result = {
+                            "status": "ok",
+                            "code": code,
+                            "sms_key": hashlib.sha256(
+                                f"{activation_id}:{code}".encode("utf-8")
+                            ).hexdigest(),
+                        }
+                        return code
+            except Exception as e:
+                logger.debug("5sim check 失败: %s", e)
+
+            elapsed = time.time() - start
+            expected = min(openai_resend_max, int(elapsed // openai_resend_interval))
+            if expected > openai_resend_count and self._resend_callback:
+                try:
+                    self._resend_callback()
+                    openai_resend_count = expected
+                    logger.info(
+                        "5sim: 已请求 OpenAI 端 resend (第 %d/%d 次, elapsed=%ds)",
+                        openai_resend_count, openai_resend_max, int(elapsed),
+                    )
+                except Exception as e:
+                    logger.warning("OpenAI resend callback 失败: %s", e)
+            time.sleep(poll)
+        self.last_code_result = None
+        return ""
+
+    def cancel(self, activation_id: str) -> bool:
+        try:
+            resp = self._get(f"/v1/user/cancel/{activation_id}")
+            text = (resp.text or "").strip()
+            if resp.status_code == 200 and text.startswith("{"):
+                data = resp.json()
+                status = str((data or {}).get("status") or "").upper()
+                # 仅当订单状态明确为已取消才算退款成功；不能用裸 200 兜底
+                ok = status in ("CANCELED", "CANCELLED")
+                logger.info("5sim cancel id=%s -> %s %s ok=%s",
+                            activation_id, resp.status_code, status or text[:80], ok)
+                return ok
+            # 已有 SMS / 过期等
+            logger.warning("5sim cancel 失败 id=%s: %s %s", activation_id, resp.status_code, text[:200])
+            return False
+        except Exception as e:
+            logger.warning("5sim cancel 异常 id=%s: %s", activation_id, e)
+            return False
+
+    def report_success(self, activation_id: str) -> bool:
+        if self.last_code_result and self.last_code_result.get("code"):
+            self._used_codes.add(str(self.last_code_result["code"]))
+        try:
+            resp = self._get(f"/v1/user/finish/{activation_id}")
+            ok = resp.status_code == 200
+            logger.info("5sim finish id=%s -> %s", activation_id, resp.status_code)
+            return ok
+        except Exception as e:
+            logger.warning("5sim finish 异常 id=%s: %s", activation_id, e)
+            return False
+
+    def mark_code_failed(self, activation_id: str, reason: str = "") -> None:
+        if self.last_code_result and self.last_code_result.get("code"):
+            self._used_codes.add(str(self.last_code_result["code"]))
+        if self._resend_callback:
+            try:
+                self._resend_callback()
+            except Exception:
+                pass
+
+    def mark_send_failed(self, activation_id: str, reason: str = "") -> None:
+        # OpenAI 拒号 → ban（比 cancel 更准确；已收 SMS 时 cancel 会失败）
+        try:
+            resp = self._get(f"/v1/user/ban/{activation_id}")
+            if resp.status_code == 200:
+                logger.info("5sim ban 成功 id=%s reason=%s", activation_id, reason or "")
+                return
+            logger.info("5sim ban 非 200，fallback cancel id=%s: %s %s",
+                        activation_id, resp.status_code, (resp.text or "")[:120])
+        except Exception as e:
+            logger.warning("5sim ban 异常 id=%s: %s", activation_id, e)
+        try:
+            self.cancel(activation_id)
+        except Exception:
+            pass
+        logger.info("5sim 号 id=%s 已标记失败 (原因: %s)", activation_id, reason or "未知")
+
+    def mark_send_succeeded(self, activation_id: str) -> None:
+        return None
+
+    def set_resend_callback(self, callback: Optional[Callable[[], None]]) -> None:
+        self._resend_callback = callback
+
+
+# ---------------------------------------------------------------------------
 # 后台取消队列：EARLY_CANCEL_DENIED（号未到最小激活时长）时不阻塞主流程，
 # 把 cancel 任务丢到后台线程，等够 minActivationTime 再重试 cancelActivation/setStatus=8。
 # ---------------------------------------------------------------------------
@@ -1101,7 +1586,7 @@ def _bg_cancel_worker() -> None:
 def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
     """从配置创建 provider 实例。
 
-    provider_key: smsbower / herosms
+    provider_key: smsbower / herosms / 5sim
     config 字段：sms_api_key / sms_country / sms_service / sms_max_price /
                 sms_reuse_phone / sms_phone_success_max
     """
@@ -1110,7 +1595,7 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
     if not api_key:
         raise RuntimeError(f"{pk} 未配置 API Key")
     country = str(config.get("sms_country") or "").strip()
-    service = str(config.get("sms_service") or "").strip() or "dr"
+    service = str(config.get("sms_service") or "").strip()
     # 接码 API 请求走的代理：复用全局 proxy（registrar 注入注册流程的代理），
     # 也允许调用方显式传 sms_proxy 覆盖（保留扩展点，目前 WebUI 不暴露）。
     proxy = (str(config.get("sms_proxy") or config.get("proxy") or "")).strip() or None
@@ -1118,9 +1603,20 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
     reuse = _safe_bool(config.get("sms_reuse_phone"), False)
     succ_max = max(0, _safe_int(config.get("sms_phone_success_max"), 3))
 
+    if pk in ("5sim", "fivesim", "five_sim"):
+        return FiveSimProvider(
+            api_key=api_key,
+            default_service=service or FIVESIM_DEFAULT_SERVICE,
+            default_country=country or FIVESIM_DEFAULT_COUNTRY,
+            max_price=max_price,
+            proxy=proxy,
+            reuse_phone_to_max=reuse,
+            phone_success_max=succ_max,
+        )
+
     common_kwargs = dict(
         api_key=api_key,
-        default_service=service,
+        default_service=service or "dr",
         default_country=country or SMS_DEFAULT_COUNTRY,
         max_price=max_price,
         proxy=proxy,
@@ -1208,7 +1704,11 @@ class PhoneCallbackController:
         limit = self._max_country_attempts()
         if limit <= 0:
             return
-        name = SMS_COUNTRY_NAMES_CN.get(country, "?")
+        name = (
+            SMS_COUNTRY_NAMES_CN.get(country)
+            or FIVESIM_COUNTRY_NAMES_CN.get(str(country).lower())
+            or "?"
+        )
         if n >= limit:
             reason = f"本轮接码失败 {n}/{limit}"
             _persist_exhausted_country(
@@ -1251,7 +1751,11 @@ class PhoneCallbackController:
                 process_set = set(_EXHAUSTED_COUNTRIES.get(pk, set()))
             parts = []
             for c in sorted(exhausted):
-                name = SMS_COUNTRY_NAMES_CN.get(c, "?")
+                name = (
+                    SMS_COUNTRY_NAMES_CN.get(c)
+                    or FIVESIM_COUNTRY_NAMES_CN.get(str(c).lower())
+                    or "?"
+                )
                 if c in process_set:
                     parts.append(f"{c}({name})·不可用")
                 else:
@@ -1298,13 +1802,23 @@ class PhoneCallbackController:
         raw_candidates: list[str] = []
         exhausted = self._exhausted_countries()
 
-        if self.auto_select_country and isinstance(provider, SmsBowerProvider):
+        supports_top = isinstance(provider, (SmsBowerProvider, FiveSimProvider))
+        if self.auto_select_country and supports_top:
+            # 5sim 用 slug 白名单；sms-activate 系用数字 ID 白名单
+            if isinstance(provider, FiveSimProvider):
+                safe_set = OPENAI_SMS_COUNTRIES_FIVESIM
+                name_map = FIVESIM_COUNTRY_NAMES_CN
+                allowed_list = [_fivesim_norm_country(c) for c in allowed_list]
+            else:
+                safe_set = OPENAI_SMS_COUNTRIES
+                name_map = SMS_COUNTRY_NAMES_CN
             if allowed_list:
                 self.log(f"🔍 自动选号: 从主人勾选的 {len(allowed_list)} 个国家依次尝试（按价格升序）")
                 try:
                     rows = provider.get_top_countries(service=self.service)
                     # 按价格升序排，只保留在 allowed_list 中的
-                    in_allow = [r for r in rows if str(r.get("country") or "") in allowed_list]
+                    allow_set = set(allowed_list)
+                    in_allow = [r for r in rows if str(r.get("country") or "") in allow_set]
                     ordered_allowed = [str(r["country"]) for r in in_allow]
                     # 把 allowed 里没在排名中出现的也加在最后
                     appended = [c for c in allowed_list if c not in ordered_allowed]
@@ -1324,7 +1838,7 @@ class PhoneCallbackController:
 
                     def _qualifies(row: dict, stock_threshold: int) -> bool:
                         cid = str(row.get("country") or "")
-                        if strict_whitelist and cid not in OPENAI_SMS_COUNTRIES:
+                        if strict_whitelist and cid not in safe_set:
                             return False
                         if max_price > 0 and (row.get("price") or 0) > max_price:
                             return False
@@ -1337,8 +1851,10 @@ class PhoneCallbackController:
                     if raw_candidates:
                         labels = []
                         for cid in raw_candidates[:5]:
-                            name = SMS_COUNTRY_NAMES_CN.get(cid, "未知")
-                            wl = "✅白名单" if cid in OPENAI_SMS_COUNTRIES else "⚠️非白名单"
+                            name = name_map.get(cid, "未知") if isinstance(name_map, dict) else "未知"
+                            if name == "未知":
+                                name = SMS_COUNTRY_NAMES_CN.get(cid) or FIVESIM_COUNTRY_NAMES_CN.get(cid, "未知")
+                            wl = "✅白名单" if cid in safe_set else "⚠️非白名单"
                             labels.append(f"{cid} {name}[{wl}]")
                         self.log(f"✅ 自动选择国家候选: {' > '.join(labels)}{' ...' if len(raw_candidates) > 5 else ''}")
                     else:
@@ -1358,17 +1874,38 @@ class PhoneCallbackController:
                 raw_candidates = [self.country] if self.country else []
 
         country_candidates = self._filter_country_limit(raw_candidates)
+        fallback_country = (
+            FIVESIM_DEFAULT_COUNTRY
+            if isinstance(provider, FiveSimProvider)
+            else SMS_DEFAULT_COUNTRY
+        )
         if not country_candidates:
-            self.log(f"⚠️ 没有候选国家，fallback 默认国家 {SMS_DEFAULT_COUNTRY}")
-            country_candidates = self._filter_country_limit([SMS_DEFAULT_COUNTRY]) or [SMS_DEFAULT_COUNTRY]
+            self.log(f"⚠️ 没有候选国家，fallback 默认国家 {fallback_country}")
+            country_candidates = self._filter_country_limit([fallback_country]) or [fallback_country]
+
+        def _cname(c: str) -> str:
+            return (
+                SMS_COUNTRY_NAMES_CN.get(c)
+                or FIVESIM_COUNTRY_NAMES_CN.get(str(c).lower())
+                or "?"
+            )
 
         country_label_log = ",".join(
-            f"{c}({SMS_COUNTRY_NAMES_CN.get(c, '?')})" for c in country_candidates[:5]
+            f"{c}({_cname(c)})" for c in country_candidates[:5]
         )
-        self.log(f"📱 准备租号: provider={self.provider_key} service={self.service} 候选={country_label_log}{' ...' if len(country_candidates) > 5 else ''}")
+        # 5sim service 默认 openai；sms-activate 系默认 dr
+        service_for_rent = self.service
+        if isinstance(provider, FiveSimProvider) and (
+            not service_for_rent or service_for_rent in ("dr", "openai_sms", "chatgpt")
+        ):
+            service_for_rent = FIVESIM_DEFAULT_SERVICE
+        self.log(
+            f"📱 准备租号: provider={self.provider_key} service={service_for_rent} "
+            f"候选={country_label_log}{' ...' if len(country_candidates) > 5 else ''}"
+        )
         try:
             self.activation = provider.get_number(
-                service=self.service,
+                service=service_for_rent,
                 country=country_candidates[0],
                 country_candidates=country_candidates,
             )
@@ -1380,7 +1917,7 @@ class PhoneCallbackController:
         used_country = str(self.activation.country or country_candidates[0] or "").strip()
         if used_country:
             self._last_country = used_country
-        used_country_label = f"{used_country} {SMS_COUNTRY_NAMES_CN.get(used_country, '')}"
+        used_country_label = f"{used_country} {_cname(used_country)}"
         limit = self._max_country_attempts()
         count_hint = ""
         if limit > 0 and used_country:
