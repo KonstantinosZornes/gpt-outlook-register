@@ -1294,11 +1294,18 @@ class FiveSimProvider(BaseSmsProvider):
             params["maxPrice"] = self.max_price
         if self.reuse_phone_to_max:
             params["reuse"] = "1"
-        logger.info("5sim buy: country=%s operator=%s product=%s maxPrice=%s",
-                    country, self.operator, product, params.get("maxPrice", "未设置"))
+        url = f"{self.base_url}{path}"
+        logger.info(
+            "5sim buy request: GET %s params=%s country=%s operator=%s product=%s maxPrice=%s",
+            url, params or None, country, self.operator, product, params.get("maxPrice", "未设置"),
+        )
         resp = self._get(path, params=params or None)
-        # 200 + "no free phones" 等
         text = (resp.text or "").strip()
+        logger.info(
+            "5sim buy response: status=%s url=%s body=%s",
+            resp.status_code, getattr(resp, "url", url), text[:800],
+        )
+        # 200 + "no free phones" 等
         if text and not text.startswith("{"):
             raise RuntimeError(f"5sim buy {country}: {text[:200]}")
         data = self._raise_if_error(resp, f"buy:{country}")
@@ -1321,7 +1328,11 @@ class FiveSimProvider(BaseSmsProvider):
         )
         self.current_activation = activation
         self._used_codes.clear()
-        logger.info("5sim 租到号 %s id=%s country=%s", phone, aid, activation.country)
+        logger.info(
+            "5sim 租到号 phone=%s id=%s country=%s price=%s operator=%s product=%s",
+            phone, aid, activation.country, data.get("price"),
+            data.get("operator"), data.get("product") or product,
+        )
         return activation
 
     def get_number(self, *, service: str, country: str = "",
