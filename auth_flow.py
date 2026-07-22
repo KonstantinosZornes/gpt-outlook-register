@@ -1169,6 +1169,11 @@ class AuthFlow:
                     err_text = str(e)
                     logger.warning("[sms] validate 失败 (phone=%s code=%s): %s",
                                    phone, code, err_text[:200])
+                    if self._is_account_deactivated_error(e):
+                        logger.warning(
+                            "[sms] 账号已被 OpenAI 标记为删除/停用，停止换号避免继续消耗接码资源"
+                        )
+                        raise
                     ctrl.mark_code_failed(err_text)
                     # 继续 while 循环等下一条 code（同号）
 
