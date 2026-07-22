@@ -358,33 +358,30 @@ def _do_register(
 
         export_failed = False
         if agent_identity_only:
-            # agent 模式：
-            # - 本地号池：mark_done（避免已注册邮箱再被 claim）
-            # - OEP：导出成功/未导出时 release 回池（产品要求）；导出失败不 release
+            # agent 模式：成功后与 oauth 一致，不释放邮箱回池
+            # - 本地号池：mark_done
+            # - OEP：complete_success
             export_ok = True
             if export_result and export_result.get("any_attempted"):
                 export_ok = bool(export_result.get("ok"))
             if export_ok:
                 if mail_source not in _NON_POOL_SOURCES:
                     db.mark_done(email)
-                    logging.getLogger("registrar").info(
-                        "[register] Agent Identity：凭证已落库，本地号池 mark_done"
-                    )
-                elif hasattr(mail, "release"):
-                    mail.release("Agent Identity only，导入后释放回池")
-                    logging.getLogger("registrar").info(
-                        "[register] Agent Identity：凭证已落库，OEP 账号释放回池"
-                    )
+                if mail_source == "oep" and hasattr(mail, "complete_success"):
+                    mail.complete_success("注册成功")
+                logging.getLogger("registrar").info(
+                    "[register] Agent Identity：凭证已落库，邮箱标记完成（不释放回池）"
+                )
             else:
                 export_failed = True
                 err_msg = (
                     "agent_identity_export_failed: Agent Identity 已注册并落库，"
-                    "但导出失败，邮箱不释放回 available"
+                    "但导出失败"
                 )
                 logging.getLogger("registrar").error(f"[register] {err_msg}")
                 if mail_source not in _NON_POOL_SOURCES:
                     db.mark_failed(email, err_msg[:500])
-                # OEP：不 release / 不 complete_success，避免号被立刻重新 claim
+                # OEP：导出失败不 complete_success / 不 release
         else:
             # CF 模式下 email 是虚拟占位（cf_placeholder_XXX@cf.local），不操作号池；
             # OEP 模式由 provider 自己回传 claim-complete，也不走本地号池
