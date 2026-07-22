@@ -155,11 +155,22 @@ def _do_register(
         # 单号 WebUI 场景下 fast-fail 没意义（批量跑才需要"跳过被识别的号"），故强制 ON。
         env_overrides["WEBUI_ALLOW_LOGIN"] = "1"
         env_overrides["OTP_TIMEOUT"] = str(int(options.get("otp_timeout") or 180))
-        # 用户不要 refresh_token → 直接跳过 Codex OAuth（每次都失败浪费 ~10s + 一堆告警）
-        if not options.get("want_refresh_token", True):
+        # 认证模式互斥：oauth 只换 RT；agent_identity 只注册 agent，绝不交叉。
+        agent_identity_only = bool(options.get("agent_identity_only"))
+        if agent_identity_only:
+            env_overrides["OAUTH_CODEX_AGENT_IDENTITY"] = "1"
             env_overrides["SKIP_OAUTH_TOKEN_EXCHANGE"] = "1"
             env_overrides["OAUTH_CODEX_RT_EXCHANGE"] = "0"
             env_overrides["OAUTH_CODEX_RT_BEFORE_CALLBACK"] = "0"
+            env_overrides["OAUTH_SECONDARY_AUTHORIZE_EXCHANGE"] = "0"
+        else:
+            # oauth 模式：关掉 Agent Identity，避免额外注册密钥对
+            env_overrides["OAUTH_CODEX_AGENT_IDENTITY"] = "0"
+            # 用户不要 refresh_token → 再跳过 Codex OAuth RT
+            if not options.get("want_refresh_token", True):
+                env_overrides["SKIP_OAUTH_TOKEN_EXCHANGE"] = "1"
+                env_overrides["OAUTH_CODEX_RT_EXCHANGE"] = "0"
+                env_overrides["OAUTH_CODEX_RT_BEFORE_CALLBACK"] = "0"
         # 跳过人类模拟间隔（auth_flow._human_delay 读 HUMAN_DELAY）
         if db.get_setting("skip_human_delay", "0") in ("1", "true", "yes", "on"):
             env_overrides["HUMAN_DELAY"] = "0"
@@ -340,15 +351,16 @@ def _do_register(
                     "codex_oauth_refresh_token_missing: 已完成注册但未获取 Codex OAuth refresh_token，"
                     "本次不落库并释放邮箱回 available"
                 )
-        if full.get("agent_runtime_id"):
-            d["agent_runtime_id"] = full["agent_runtime_id"]
-            d["agent_private_key"] = full.get("agent_private_key", "")
-
-        if agent_identity_only and not full.get("agent_runtime_id"):
-            raise RuntimeError(
-                "codex_agent_identity_missing: 认证模式为 agent_identity 但未获取 agent_runtime_id，"
-                "本次不落库并释放邮箱回 available"
-            )
+        if agent_identity_only:
+            if full.get("agent_runtime_id"):
+                d["agent_runtime_id"] = full["agent_runtime_id"]
+                d["agent_private_key"] = full.get("agent_private_key", "")
+            else:
+                raise RuntimeError(
+                    "codex_agent_identity_missing: 认证模式为 agent_identity 但未获取 agent_runtime_id，"
+                    "本次不落库并释放邮箱回 available"
+                )
+        # oauth 模式不落库 agent 字段（即使流程里意外拿到也不保存）
 
         # 落库
         db.save_registered(d)

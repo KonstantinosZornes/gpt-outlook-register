@@ -483,9 +483,9 @@
             </select>
           </label>
           <p class="hint" style="margin:6px 0 0">
-            全局配置：决定注册后如何获取/导出凭证。<br>
-            · <b>OAuth Token</b>：走 Codex OAuth refresh_token（可能触发绑手机号）<br>
-            · <b>Codex Agent Identity</b>：注册 agent 密钥对，当前仅支持 SUB2API 上传（强制跳过 CPA）
+            全局配置，二选一互斥（注册链路与导出都只走所选模式）。<br>
+            · <b>OAuth Token</b>：只换 Codex OAuth refresh_token（可能触发绑手机号；不注册 Agent Identity）<br>
+            · <b>Codex Agent Identity</b>：只注册 agent 密钥对，跳过 RT / add-phone；当前仅支持 SUB2API（强制跳过 CPA）
           </p>
         </fieldset>
 
