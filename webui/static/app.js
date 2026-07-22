@@ -1427,6 +1427,8 @@ $("#btnTest5sim")?.addEventListener("click", async (e) => {
 async function loadExportConfig() {
   try {
     const { config } = await api("/api/settings/export");
+    // 全局认证模式
+    $("#authMode").value = config.auth_mode || "oauth";
     // CPA
     $("#cpaEnabled").checked = config.cpa_enabled === "1";
     $("#cpaUrl").value = config.cpa_url || "";
@@ -1453,6 +1455,8 @@ $("#btnSaveExportCfg").addEventListener("click", async () => {
   const cpaKeyInput = $("#cpaMgmtKey").value.trim();
   const sub2apiKeyInput = $("#sub2apiApiKey").value.trim();
   const body = {
+    // 全局认证模式
+    auth_mode:    $("#authMode").value || "oauth",
     // CPA
     cpa_enabled:  $("#cpaEnabled").checked ? "1" : "0",
     cpa_url:      $("#cpaUrl").value.trim(),

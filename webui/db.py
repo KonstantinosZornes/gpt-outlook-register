@@ -1087,11 +1087,13 @@ def get_export_config() -> dict:
       保存时传 '***' 代表不修改。
     """
     return {
+        # 全局认证模式（独立于导出目标）
+        "auth_mode":          get_setting("export_auth_mode", "oauth"),
         # CPA
-        "cpa_enabled":     get_setting("export_cpa_enabled", "0"),
-        "cpa_url":         get_setting("export_cpa_url", ""),
-        "cpa_mgmt_key":    "***" if get_setting("export_cpa_mgmt_key") else "",
-        "cpa_timeout":     get_setting("export_cpa_timeout", "30"),
+        "cpa_enabled":        get_setting("export_cpa_enabled", "0"),
+        "cpa_url":            get_setting("export_cpa_url", ""),
+        "cpa_mgmt_key":       "***" if get_setting("export_cpa_mgmt_key") else "",
+        "cpa_timeout":        get_setting("export_cpa_timeout", "30"),
         # SUB2API
         "sub2api_enabled":    get_setting("export_sub2api_enabled", "0"),
         "sub2api_url":        get_setting("export_sub2api_url", ""),
@@ -1117,6 +1119,7 @@ def save_export_config(data: dict) -> None:
                 set_setting(key_out, "1" if s in ("1", "true", "yes", "on") else "0")
     # 字符串字段（明文）
     for key_in, key_out in (
+        ("auth_mode",          "export_auth_mode"),
         ("cpa_url",            "export_cpa_url"),
         ("cpa_timeout",        "export_cpa_timeout"),
         ("sub2api_url",        "export_sub2api_url"),
@@ -1135,8 +1138,9 @@ def save_export_config(data: dict) -> None:
 def get_export_internal_config() -> dict:
     """内部用：拿明文密钥 + 解析后的 enabled 布尔。供 registrar / app.test 调用。
 
-    返回两个子配置 dict，可分别传给 exporter.export_to_cpa / export_to_sub2api。
+    返回 auth_mode + 两个子配置 dict，可分别传给 exporter.export_to_cpa / export_to_sub2api。
     """
+    auth_mode = get_setting("export_auth_mode", "oauth")
     cpa = {
         "enabled":      get_setting("export_cpa_enabled", "0") in ("1", "true"),
         "cpa_url":      get_setting("export_cpa_url", ""),
@@ -1150,7 +1154,7 @@ def get_export_internal_config() -> dict:
         "sub2api_group_ids":  get_setting("export_sub2api_group_ids", "2"),
         "sub2api_timeout":    get_setting("export_sub2api_timeout", "30"),
     }
-    return {"cpa": cpa, "sub2api": sub2api}
+    return {"auth_mode": auth_mode, "cpa": cpa, "sub2api": sub2api}
 
 
 # 模块加载时自动建表

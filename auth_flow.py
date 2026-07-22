@@ -41,12 +41,14 @@ class AuthResult:
         self.id_token: str = ""
         self.refresh_token: str = ""
         self.cookie_header: str = ""
+        self.agent_runtime_id: str = ""
+        self.agent_private_key: str = ""
 
     def is_valid(self) -> bool:
         return bool(self.session_token and self.access_token)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "email": self.email,
             "password": self.password,
             "session_token": self.session_token,
@@ -57,6 +59,10 @@ class AuthResult:
             "refresh_token": self.refresh_token,
             "cookie_header": self.cookie_header,
         }
+        if self.agent_runtime_id:
+            d["agent_runtime_id"] = self.agent_runtime_id
+            d["agent_private_key"] = self.agent_private_key
+        return d
 
 
 class AuthFlow:
@@ -1364,6 +1370,38 @@ class AuthFlow:
             )
         except Exception as e:
             logger.warning(f"Codex OAuth 交换异常: {e}")
+            return False
+
+    def codex_agent_identity_exchange(self) -> bool:
+        """通过 Agent Identity API 注册 Ed25519 密钥对，绕过 add-phone 获取 Codex 凭证。"""
+        if not self.result.access_token:
+            logger.warning("Agent Identity: 无 accessToken，跳过")
+            return False
+        try:
+            from codex_agent import (
+                extract_account_info,
+                generate_ed25519_keypair,
+                register_codex_agent,
+            )
+
+            logger.info("尝试 Agent Identity 注册（绕过 add-phone）...")
+            private_key_b64, public_key_ssh = generate_ed25519_keypair()
+            agent_runtime_id = register_codex_agent(
+                self.session,
+                self.result.access_token,
+                public_key_ssh,
+            )
+            self.result.agent_runtime_id = agent_runtime_id
+            self.result.agent_private_key = private_key_b64
+            info = extract_account_info(self.result.access_token)
+            logger.info(
+                "Agent Identity 注册成功: agent_runtime_id=%s account=%s",
+                agent_runtime_id[:20] + "...",
+                info.get("account_id", "")[:20],
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Agent Identity 注册失败（不影响已有凭证）: {e}")
             return False
 
     def _inject_pkce_into_auth_url(self, auth_url: str) -> str:
@@ -3021,15 +3059,14 @@ class AuthFlow:
         if not refresh_only_mode:
             self.get_auth_session()
 
-        # Codex OAuth refresh_token 交换（独立 authorize 链路，不依赖上面 callback 的 code）
+        # Agent Identity 注册优先：不走 Codex OAuth，因此不会触发 add-phone。
         if callback_url or continue_url:
             self.fetch_client_auth_session_dump("pre_oauth_exchange_register")
-            # 注意：oauth_token_exchange(callback_url) 会和 NextAuth 抢同一个 code，
-            # 默认禁用避免冲突；只有用户显式 SET OAUTH_TOKEN_EXCHANGE_FROM_CALLBACK=1
-            # 才尝试（极少需要，access_token 已通过 NextAuth callback 拿到）。
             if self._env_flag("OAUTH_TOKEN_EXCHANGE_FROM_CALLBACK", "0") \
                     and not self._env_flag("SKIP_OAUTH_TOKEN_EXCHANGE", "0"):
                 self.oauth_token_exchange(callback_url or "", continue_url or "")
+            if self._env_flag("OAUTH_CODEX_AGENT_IDENTITY", "1") and not self.result.agent_runtime_id:
+                self.codex_agent_identity_exchange()
             if (not self.result.refresh_token) and self._env_flag("OAUTH_CODEX_RT_EXCHANGE", "1"):
                 self.oauth_codex_rt_exchange(mail_provider=mail_provider)
             if (not self.result.refresh_token) and self._env_flag("OAUTH_SECONDARY_AUTHORIZE_EXCHANGE", "0"):
@@ -3241,6 +3278,8 @@ class AuthFlow:
         if callback_url or continue_url:
             self.fetch_client_auth_session_dump("pre_oauth_exchange_protocol")
             self.oauth_token_exchange(callback_url or "", continue_url or "")
+            if self._env_flag("OAUTH_CODEX_AGENT_IDENTITY", "1") and not self.result.agent_runtime_id:
+                self.codex_agent_identity_exchange()
             if (not self.result.refresh_token) and self._env_flag("OAUTH_CODEX_RT_EXCHANGE", "1"):
                 self.oauth_codex_rt_exchange(mail_provider=mail_provider)
             if (not self.result.refresh_token) and self._env_flag("OAUTH_SECONDARY_AUTHORIZE_EXCHANGE", "0"):
@@ -3343,4 +3382,3 @@ class AuthFlow:
         self.result.email = detected_email or ""
         logger.info("使用已有凭证初始化完成")
         return self.result
-

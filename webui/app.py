@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -217,6 +217,11 @@ def api_stats():
 def api_register(req: RegisterReq):
     """启动注册任务，返回 run_id。前端拿 run_id 去 /api/runs/{run_id}/stream 订阅 SSE。"""
     mail_source = db.get_setting("mail_source", "outlook")
+    export_cfg = db.get_export_internal_config()
+    auth_mode = str(export_cfg.get("auth_mode") or "oauth").strip().lower()
+    agent_identity_only = auth_mode == "agent_identity"
+    if agent_identity_only and req.want_refresh_token:
+        logger.info("[run] 认证模式=agent_identity: 跳过 Codex refresh_token 获取，避免进入 add-phone")
     is_pool_less = mail_source in ("cf_temp", "oep")
     proxy = req.proxy
     if req.random_proxy_from_pool:
@@ -261,7 +266,8 @@ def api_register(req: RegisterReq):
     options = {
         "want_access_token": req.want_access_token,
         "want_session_token": req.want_session_token,
-        "want_refresh_token": req.want_refresh_token,
+        "want_refresh_token": False if agent_identity_only else req.want_refresh_token,
+        "agent_identity_only": agent_identity_only,
         "proxy": proxy,
         "otp_timeout": int(req.otp_timeout),
         "allow_existing_login": req.allow_existing_login,
@@ -346,6 +352,54 @@ def api_registered_one(email: str):
     if not row:
         raise HTTPException(404, "not found")
     return {"ok": True, "data": row}
+
+
+@app.get("/api/registered/{email}/auth_json")
+def api_registered_auth_json(email: str):
+    """导出 Codex CLI auth.json（需要 Agent Identity 凭证）。"""
+    row = db.get_registered(email)
+    if not row:
+        raise HTTPException(404, "not found")
+    extra = row.get("extra") or {}
+    agent_runtime_id = extra.get("agent_runtime_id", "")
+    agent_private_key = extra.get("agent_private_key", "")
+    if not agent_runtime_id or not agent_private_key:
+        raise HTTPException(400, "该账号没有 Agent Identity 凭证（无 agent_runtime_id）")
+
+    access_token = row.get("access_token", "")
+    account_id = ""
+    user_id = ""
+    plan_type = "free"
+    account_email = row.get("email", email)
+    if access_token:
+        try:
+            from codex_agent import extract_account_info
+            info = extract_account_info(access_token)
+            account_id = info.get("account_id", "")
+            user_id = info.get("user_id", "")
+            account_email = info.get("email", "") or account_email
+            plan_type = info.get("plan_type", "free")
+        except Exception:
+            pass
+    if not account_id or not user_id:
+        raise HTTPException(
+            400,
+            "无法从 access_token 解析 account_id/user_id，无法生成可用的 auth.json",
+        )
+
+    from codex_agent import build_auth_json
+    auth_json = build_auth_json(
+        agent_runtime_id=agent_runtime_id,
+        private_key_b64=agent_private_key,
+        account_id=account_id,
+        user_id=user_id,
+        email=account_email,
+        plan_type=plan_type,
+    )
+    return JSONResponse(
+        content=auth_json,
+        headers={"Content-Disposition": 'attachment; filename="auth.json"'},
+    )
 
 
 @app.delete("/api/registered/{email}")
@@ -718,6 +772,8 @@ def api_sms_all_countries(provider: str = ""):
 
 
 class SaveExportConfigReq(BaseModel):
+    # 全局认证模式：oauth / agent_identity
+    auth_mode: Optional[str] = None
     # CPA
     cpa_enabled: Optional[str] = None       # "0" / "1"
     cpa_url: Optional[str] = None
@@ -783,23 +839,31 @@ def api_manual_export_to_panel(req: ManualExportReq):
         raise HTTPException(404, f"未找到已注册账号: {req.email}")
 
     cfg = db.get_export_internal_config()
+    auth_mode = str(cfg.get("auth_mode") or "oauth").strip().lower()
     out = {"email": req.email, "cpa": None, "sub2api": None}
     targets = {t.strip().lower() for t in (req.targets or []) if t}
 
+    cpa_cfg = None
+    sub2api_cfg = None
     if "cpa" in targets:
         cpa_cfg = dict(cfg["cpa"])
         cpa_cfg["enabled"] = True  # 手动触发：强制启用
-        try:
-            out["cpa"] = exporter.export_to_cpa(cred, cpa_cfg)
-        except Exception as e:
-            out["cpa"] = {"ok": False, "error": str(e)}
+        cpa_cfg["auth_mode"] = auth_mode
     if "sub2api" in targets:
         sub2api_cfg = dict(cfg["sub2api"])
         sub2api_cfg["enabled"] = True
+        sub2api_cfg["auth_mode"] = auth_mode
+
+    if cpa_cfg or sub2api_cfg:
         try:
-            out["sub2api"] = exporter.export_to_sub2api(cred, sub2api_cfg)
+            result = exporter.run_exports(cred, cpa_cfg=cpa_cfg, sub2api_cfg=sub2api_cfg)
+            out["cpa"] = result.get("cpa")
+            out["sub2api"] = result.get("sub2api")
         except Exception as e:
-            out["sub2api"] = {"ok": False, "error": str(e)}
+            if cpa_cfg:
+                out["cpa"] = {"ok": False, "error": str(e)}
+            if sub2api_cfg:
+                out["sub2api"] = {"ok": False, "error": str(e)}
 
     return {"ok": True, **out}
 

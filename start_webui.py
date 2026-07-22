@@ -64,17 +64,20 @@ def main():
         import requests  # noqa: F401
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
+        import cryptography  # noqa: F401
     except ImportError:
-        print("[!] 缺少依赖，正在安装 curl-cffi / requests / fastapi / uvicorn ...")
+        print("[!] 缺少依赖，正在安装 curl-cffi / requests / fastapi / uvicorn / cryptography ...")
         subprocess.check_call([
             sys.executable, "-m", "pip", "install",
             "curl-cffi>=0.7.0", "requests>=2.31.0",
             "fastapi>=0.110.0", "uvicorn[standard]>=0.27.0", "pydantic>=2.5.0",
+            "cryptography>=42.0.0",
         ])
         import curl_cffi  # noqa: F401
         import requests  # noqa: F401
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
+        import cryptography  # noqa: F401
 
     sys.path.insert(0, str(ROOT))
     import uvicorn

@@ -473,6 +473,22 @@
 
       <div class="form">
 
+        <!-- ── 认证模式（全局） ── -->
+        <fieldset>
+          <legend>🔑 认证模式</legend>
+          <label>认证模式
+            <select id="authMode">
+              <option value="oauth">OAuth Token</option>
+              <option value="agent_identity">Codex Agent Identity</option>
+            </select>
+          </label>
+          <p class="hint" style="margin:6px 0 0">
+            全局配置：决定注册后如何获取/导出凭证。<br>
+            · <b>OAuth Token</b>：走 Codex OAuth refresh_token（可能触发绑手机号）<br>
+            · <b>Codex Agent Identity</b>：注册 agent 密钥对，当前仅支持 SUB2API 上传（强制跳过 CPA）
+          </p>
+        </fieldset>
+
         <!-- ── CPA ── -->
         <fieldset>
           <legend>🅰️ CPA 面板</legend>

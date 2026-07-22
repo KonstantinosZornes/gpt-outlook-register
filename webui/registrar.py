@@ -93,6 +93,7 @@ _NETWORK_ERROR_PATTERNS = [
     "max retries exceeded",
     "余额不足", "sms 余额", "接码平台余额",
     "codex_oauth_refresh_token_missing",
+    "codex_agent_identity_missing",
 ]
 
 
@@ -291,13 +292,20 @@ def _do_register(
             need_session = options.get("want_session_token", True)
             need_refresh = options.get("want_refresh_token", True)
             # 用户勾选的凭证全拿到 → 算正常完成（不视为 partial）
+            agent_identity_only = bool(options.get("agent_identity_only"))
             wanted_ok = (
                 (not need_access or d.get("access_token"))
                 and (not need_session or d.get("session_token"))
-                and (not need_refresh or d.get("refresh_token"))
+                and (
+                    (agent_identity_only and d.get("agent_runtime_id"))
+                    or (not agent_identity_only and (not need_refresh or d.get("refresh_token")))
+                )
             )
             has_any = bool(
-                d.get("access_token") or d.get("refresh_token") or d.get("session_token")
+                d.get("access_token")
+                or d.get("refresh_token")
+                or d.get("session_token")
+                or d.get("agent_runtime_id")
             )
             if wanted_ok and has_any:
                 logging.getLogger("registrar").warning(
@@ -322,26 +330,68 @@ def _do_register(
         if options.get("want_session_token", True):
             d["session_token"] = full.get("session_token", "")
             d["cookie_header"] = full.get("cookie_header", "")  # 同样是浏览器注入用
+        agent_identity_only = bool(options.get("agent_identity_only"))
         if options.get("want_refresh_token", True):
             d["refresh_token"] = full.get("refresh_token", "")
             d["id_token"] = full.get("id_token", "")
-            if not d["refresh_token"]:
+            # oauth 模式：缺 RT 必须失败；agent_identity 不能用 agent 字段顶替 RT
+            if not agent_identity_only and not d["refresh_token"]:
                 raise RuntimeError(
                     "codex_oauth_refresh_token_missing: 已完成注册但未获取 Codex OAuth refresh_token，"
                     "本次不落库并释放邮箱回 available"
                 )
+        if full.get("agent_runtime_id"):
+            d["agent_runtime_id"] = full["agent_runtime_id"]
+            d["agent_private_key"] = full.get("agent_private_key", "")
+
+        if agent_identity_only and not full.get("agent_runtime_id"):
+            raise RuntimeError(
+                "codex_agent_identity_missing: 认证模式为 agent_identity 但未获取 agent_runtime_id，"
+                "本次不落库并释放邮箱回 available"
+            )
 
         # 落库
         db.save_registered(d)
-        # CF 模式下 email 是虚拟占位（cf_placeholder_XXX@cf.local），不操作号池；
-        # OEP 模式由 provider 自己回传 claim-complete，也不走本地号池
-        if mail_source not in _NON_POOL_SOURCES:
-            db.mark_done(email)
-        if mail_source == "oep" and hasattr(mail, "complete_success"):
-            mail.complete_success("注册成功")
 
         # ─ 可选：导出到 CPA / SUB2API 面板（仅勾选启用时才执行） ─
-        _try_export_to_panels(run_id, d)
+        export_result = _try_export_to_panels(run_id, d, agent_identity_only=agent_identity_only)
+
+        export_failed = False
+        if agent_identity_only:
+            # agent 模式：
+            # - 本地号池：mark_done（避免已注册邮箱再被 claim）
+            # - OEP：导出成功/未导出时 release 回池（产品要求）；导出失败不 release
+            export_ok = True
+            if export_result and export_result.get("any_attempted"):
+                export_ok = bool(export_result.get("ok"))
+            if export_ok:
+                if mail_source not in _NON_POOL_SOURCES:
+                    db.mark_done(email)
+                    logging.getLogger("registrar").info(
+                        "[register] Agent Identity：凭证已落库，本地号池 mark_done"
+                    )
+                elif hasattr(mail, "release"):
+                    mail.release("Agent Identity only，导入后释放回池")
+                    logging.getLogger("registrar").info(
+                        "[register] Agent Identity：凭证已落库，OEP 账号释放回池"
+                    )
+            else:
+                export_failed = True
+                err_msg = (
+                    "agent_identity_export_failed: Agent Identity 已注册并落库，"
+                    "但导出失败，邮箱不释放回 available"
+                )
+                logging.getLogger("registrar").error(f"[register] {err_msg}")
+                if mail_source not in _NON_POOL_SOURCES:
+                    db.mark_failed(email, err_msg[:500])
+                # OEP：不 release / 不 complete_success，避免号被立刻重新 claim
+        else:
+            # CF 模式下 email 是虚拟占位（cf_placeholder_XXX@cf.local），不操作号池；
+            # OEP 模式由 provider 自己回传 claim-complete，也不走本地号池
+            if mail_source not in _NON_POOL_SOURCES:
+                db.mark_done(email)
+            if mail_source == "oep" and hasattr(mail, "complete_success"):
+                mail.complete_success("注册成功")
 
         result_summary = {
             "email": d.get("email"),
@@ -349,15 +399,28 @@ def _do_register(
             "session_token_len": len(d.get("session_token") or ""),
             "refresh_token_len": len(d.get("refresh_token") or ""),
             "partial": partial,
+            "export_failed": export_failed,
         }
-        _emit_status(run_id, "done", result_summary)
-        logging.getLogger("registrar").info(
-            f"[register] 完成 email={d.get('email')} "
-            f"at={result_summary['access_token_len']} "
-            f"st={result_summary['session_token_len']} "
-            f"rt={result_summary['refresh_token_len']}"
-        )
-        db.finish_run(run_id, "done")
+        if export_failed:
+            err_msg = "agent_identity_export_failed: Agent Identity 已落库但导出失败"
+            _emit_status(
+                run_id,
+                "error",
+                {"message": err_msg, "category": "unknown", "email": d.get("email") or email},
+            )
+            logging.getLogger("registrar").error(
+                f"[register] 导出失败 email={d.get('email')} at={result_summary['access_token_len']}"
+            )
+            db.finish_run(run_id, "failed", err_msg, category="unknown")
+        else:
+            _emit_status(run_id, "done", result_summary)
+            logging.getLogger("registrar").info(
+                f"[register] 完成 email={d.get('email')} "
+                f"at={result_summary['access_token_len']} "
+                f"st={result_summary['session_token_len']} "
+                f"rt={result_summary['refresh_token_len']}"
+            )
+            db.finish_run(run_id, "done")
 
     except Exception as e:
         err = str(e)
@@ -411,23 +474,28 @@ def _do_register(
             q.put(None)  # sentinel: 流结束
 
 
-def _try_export_to_panels(run_id: str, cred: dict) -> None:
+def _try_export_to_panels(run_id: str, cred: dict, *, agent_identity_only: bool = False) -> dict:
     """注册完成后可选地把凭证导出到 CPA / SUB2API 面板。
 
     - 任一目标的"启用"开关关闭时,该目标跳过(不发请求);两者都未启用时整段 no-op。
-    - 任何异常都不抛,只 emit 日志/状态(不影响注册主流程)。
+    - agent_identity 模式下强制跳过 CPA（当前仅 SUB2API 支持）。
+    - 任何异常都不抛,只 emit 日志/状态；返回 {any_attempted, ok, summary}。
     """
     export_email = cred.get("email") or ""
+    empty = {"any_attempted": False, "ok": True, "summary": {}}
     try:
         cfg = db.get_export_internal_config()
     except Exception as e:
         logging.getLogger("registrar").warning(f"[export] 读取配置失败: {e}")
-        return
+        return {"any_attempted": False, "ok": False, "summary": {}, "error": str(e)}
 
-    cpa_enabled = bool(cfg.get("cpa", {}).get("enabled"))
+    auth_mode = str(cfg.get("auth_mode") or "oauth").strip().lower()
+    if agent_identity_only:
+        auth_mode = "agent_identity"
+    cpa_enabled = bool(cfg.get("cpa", {}).get("enabled")) and auth_mode != "agent_identity"
     sub2api_enabled = bool(cfg.get("sub2api", {}).get("enabled"))
     if not (cpa_enabled or sub2api_enabled):
-        return  # 用户没勾选任何目标 → 完全不执行
+        return empty  # 用户没勾选任何目标 → 完全不执行
 
     from . import exporter  # 懒 import,避免未启用时强依赖
 
@@ -445,29 +513,55 @@ def _try_export_to_panels(run_id: str, cred: dict) -> None:
         except Exception:
             pass
 
+    cpa_cfg = dict(cfg.get("cpa") or {}) if cpa_enabled else None
+    sub2api_cfg = dict(cfg.get("sub2api") or {}) if sub2api_enabled else None
+    if cpa_cfg is not None:
+        cpa_cfg["auth_mode"] = auth_mode
+    if sub2api_cfg is not None:
+        sub2api_cfg["auth_mode"] = auth_mode
+
     try:
         results = exporter.run_exports(
             cred,
-            cpa_cfg=cfg.get("cpa") if cpa_enabled else None,
-            sub2api_cfg=cfg.get("sub2api") if sub2api_enabled else None,
+            cpa_cfg=cpa_cfg,
+            sub2api_cfg=sub2api_cfg,
             log_fn=_log,
         )
     except Exception as e:
         _log(f"导出整体异常: {e}", "error")
-        return
+        return {"any_attempted": True, "ok": False, "summary": {}, "error": str(e)}
 
     # 汇总成一个事件给前端
     summary = {}
+    ok = True
     if results.get("cpa") is not None:
-        summary["cpa"] = {"ok": bool(results["cpa"].get("ok")),
-                          "message": results["cpa"].get("message") or results["cpa"].get("error") or ""}
+        cpa_item = results["cpa"]
+        cpa_skipped = bool(cpa_item.get("skipped"))
+        cpa_ok = bool(cpa_item.get("ok")) or cpa_skipped
+        if not cpa_skipped:
+            ok = ok and cpa_ok
+        summary["cpa"] = {
+            "ok": cpa_ok,
+            "skipped": cpa_skipped,
+            "message": cpa_item.get("message") or cpa_item.get("error") or "",
+        }
     if results.get("sub2api") is not None:
-        summary["sub2api"] = {"ok": bool(results["sub2api"].get("ok")),
-                              "message": results["sub2api"].get("message") or results["sub2api"].get("error") or ""}
+        sub2_item = results["sub2api"]
+        sub2_ok = bool(sub2_item.get("ok"))
+        ok = ok and sub2_ok
+        summary["sub2api"] = {
+            "ok": sub2_ok,
+            "message": sub2_item.get("message") or sub2_item.get("error") or "",
+        }
     try:
         _emit_status(run_id, "phase", {"phase": "export_done", "summary": summary, "email": export_email})
     except Exception:
         pass
+    return {
+        "any_attempted": bool(results.get("any_attempted")),
+        "ok": ok,
+        "summary": summary,
+    }
 
 
 def _build_sms_callback(run_id: str, email_ref: Optional[dict] = None) -> Optional[PhoneCallbackController]:
@@ -557,6 +651,17 @@ def start_registration(account: dict, options: dict) -> str:
     """启动一次注册任务，返回 run_id。"""
     # 启动前先查接码平台余额：不足直接失败，不创建 run、不消耗号码
     check_sms_balance()
+
+    # 全局认证模式：agent_identity 时强制跳过 refresh_token / CPA
+    opts = dict(options or {})
+    try:
+        auth_mode = str(db.get_export_internal_config().get("auth_mode") or "oauth").strip().lower()
+    except Exception:
+        auth_mode = "oauth"
+    if auth_mode == "agent_identity":
+        opts["agent_identity_only"] = True
+        opts["want_refresh_token"] = False
+
     run_id = uuid.uuid4().hex[:12]
     log_file = LOG_DIR / f"{run_id}.log"
     db.create_run(run_id, account["email"], str(log_file))
@@ -567,7 +672,7 @@ def start_registration(account: dict, options: dict) -> str:
 
     th = threading.Thread(
         target=_do_register,
-        args=(run_id, account, options, log_file),
+        args=(run_id, account, opts, log_file),
         daemon=True,
         name=f"register-{run_id}",
     )
@@ -582,4 +687,3 @@ def get_run_queue(run_id: str) -> Optional[queue.Queue]:
 def remove_run_queue(run_id: str) -> None:
     with _lock:
         _run_queues.pop(run_id, None)
-

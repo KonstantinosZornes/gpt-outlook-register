@@ -486,10 +486,62 @@ def build_sub2api_payload(cred: dict, group_ids: list[int]) -> dict:
     }
 
 
+def _has_agent_identity(cred: dict) -> bool:
+    extra = cred.get("extra") or {}
+    rid = cred.get("agent_runtime_id") or extra.get("agent_runtime_id") or ""
+    key = cred.get("agent_private_key") or extra.get("agent_private_key") or ""
+    return bool(rid and key)
+
+
+def _build_sub2api_agent_identity_payload(cred: dict, group_ids: list[int]) -> tuple[dict, str]:
+    """构建 SUB2API import-codex-session 的 Agent Identity payload。"""
+    extra = cred.get("extra") or {}
+    agent_runtime_id = cred.get("agent_runtime_id") or extra.get("agent_runtime_id") or ""
+    agent_private_key = cred.get("agent_private_key") or extra.get("agent_private_key") or ""
+    access_token = str(cred.get("access_token") or "").strip()
+    email = str(cred.get("email") or "").strip()
+
+    account_id = ""
+    user_id = ""
+    plan_type = "free"
+    if access_token:
+        payload = _decode_jwt_payload(access_token)
+        auth_info = _get_auth(payload)
+        account_id = str(auth_info.get("chatgpt_account_id") or "").strip()
+        user_id = str(auth_info.get("chatgpt_user_id") or "").strip()
+        plan_type = str(auth_info.get("chatgpt_plan_type") or "free").strip() or "free"
+        if not email:
+            profile = payload.get("https://api.openai.com/profile", {})
+            if isinstance(profile, dict):
+                email = str(profile.get("email") or "").strip()
+
+    auth_json = {
+        "auth_mode": "agent_identity",
+        "agent_identity": {
+            "agent_runtime_id": agent_runtime_id,
+            "agent_private_key": agent_private_key,
+            "account_id": account_id,
+            "chatgpt_user_id": user_id,
+            "email": email,
+            "plan_type": plan_type,
+            "chatgpt_account_is_fedramp": False,
+        },
+    }
+    payload = {
+        "content": json.dumps(auth_json, ensure_ascii=False),
+        "name": email or "codex-agent",
+        "update_existing": True,
+    }
+    if group_ids:
+        payload["group_ids"] = list(group_ids)
+    return payload, email
+
+
 # ──────────────────────── SUB2API：上传 ────────────────────────
 
 
 def export_to_sub2api(cred: dict, cfg: dict, *,
+                        mode: str = "oauth",
                         log_fn: Optional[Callable[[str, str], None]] = None) -> dict:
     """SUB2API x-api-key 直连上传（无登录流程）。"""
     log = log_fn or (lambda m, lvl="info": logger.info(m))
@@ -505,9 +557,19 @@ def export_to_sub2api(cred: dict, cfg: dict, *,
     timeout = int(cfg.get("sub2api_timeout") or DEFAULT_TIMEOUT)
     cffi = _import_cffi()
 
-    payload = build_sub2api_payload(cred, group_ids)
-    email = payload.get("name") or "unknown"
-    url = f"{api_url}/api/v1/admin/accounts"
+    mode = str(mode or "oauth").strip().lower()
+    if mode == "agent_identity":
+        if not _has_agent_identity(cred):
+            raise RuntimeError("认证模式为 agent_identity，但凭证缺少 agent_runtime_id / agent_private_key")
+        use_agent_identity = True
+        payload, email = _build_sub2api_agent_identity_payload(cred, group_ids)
+        url = f"{api_url}/api/v1/admin/accounts/import/codex-session"
+        log(f"[SUB2API] 使用 Agent Identity 模式导入 {email}", "info")
+    else:
+        use_agent_identity = False
+        payload = build_sub2api_payload(cred, group_ids)
+        email = payload.get("name") or "unknown"
+        url = f"{api_url}/api/v1/admin/accounts"
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/plain, */*",
@@ -537,12 +599,18 @@ def export_to_sub2api(cred: dict, cfg: dict, *,
                 try:
                     data = resp.json()
                     if isinstance(data, dict):
-                        new_id = str(data.get("id") or data.get("ID") or "").strip()
+                        if use_agent_identity:
+                            created = data.get("created", 0)
+                            updated = data.get("updated", 0)
+                            new_id = f"created={created},updated={updated}"
+                        else:
+                            new_id = str(data.get("id") or data.get("ID") or "").strip()
                 except Exception:
                     pass
-                log(f"[SUB2API] ✅ 上传成功 {email} (id={new_id or 'unknown'})", "ok")
+                mode_label = "Agent Identity" if use_agent_identity else "OAuth"
+                log(f"[SUB2API] ✅ 上传成功 {email} ({mode_label}, {new_id or 'unknown'})", "ok")
                 return {"ok": True, "email": email, "account_id": new_id,
-                        "message": f"SUB2API 上传成功 #{new_id or 'unknown'}"}
+                        "message": f"SUB2API {mode_label} 上传成功 {new_id or ''}"}
             msg = f"HTTP {resp.status_code}"
             try:
                 detail = resp.json()
@@ -658,9 +726,9 @@ def run_exports(cred: dict, *,
 
     步骤：
       1. 检查两个目标是否有任一启用，全部未启用直接返回
-      2. 用 cred['refresh_token'] 刷新一次拿新的 Codex access_token / id_token
-         （主项目最终保存的 access_token 是 NextAuth 风格的，CPA/SUB2API 不接受）
-      3. 用刷新后的 cred 走 CPA / SUB2API 导出
+      2. 全局 auth_mode=agent_identity 时强制跳过 CPA（后续再支持）
+      3. oauth 模式才用 refresh_token 换 Codex access_token
+      4. 按目标导出；SUB2API 当前支持 oauth / agent_identity
 
     返回：
         {"cpa": {...} 或 None, "sub2api": {...} 或 None, "any_attempted": bool}
@@ -668,36 +736,56 @@ def run_exports(cred: dict, *,
     log = log_fn or (lambda m, lvl="info": logger.info(m))
     out: dict = {"cpa": None, "sub2api": None, "any_attempted": False}
 
+    auth_mode = str(
+        (sub2api_cfg or {}).get("auth_mode")
+        or (cpa_cfg or {}).get("auth_mode")
+        or "oauth"
+    ).strip().lower()
+    if auth_mode not in ("oauth", "agent_identity"):
+        auth_mode = "oauth"
+
     cpa_on = bool(cpa_cfg and cpa_cfg.get("enabled"))
     sub2_on = bool(sub2api_cfg and sub2api_cfg.get("enabled"))
     if not (cpa_on or sub2_on):
         return out
 
-    # ─ 关键：先用 refresh_token 换 Codex 风格 access_token ─
-    try:
-        log("[exporter] 用 refresh_token 换新的 Codex access_token...", "info")
-        fresh = refresh_codex_token(cred.get("refresh_token", ""))
-        cred = {
-            **cred,
-            "access_token":  fresh["access_token"],
-            "refresh_token": fresh.get("refresh_token") or cred.get("refresh_token"),
-            "id_token":      fresh.get("id_token") or cred.get("id_token", ""),
+    # agent_identity 当前仅实现 SUB2API 上传，强制跳过 CPA（不算失败）
+    if auth_mode == "agent_identity" and cpa_on:
+        log("[CPA] 跳过：认证模式=agent_identity（后续再支持）", "warn")
+        out["cpa"] = {
+            "ok": True,
+            "skipped": True,
+            "message": "认证模式为 agent_identity 时暂不支持 CPA 导出，已跳过",
         }
-        log(
-            f"[exporter] ✅ Codex token 刷新成功 "
-            f"(access_token len={len(fresh['access_token'])} "
-            f"id_token len={len(fresh.get('id_token') or '')})",
-            "ok",
-        )
-    except Exception as e:
-        log(f"[exporter] ❌ Codex token 刷新失败，无法导出: {e}", "error")
-        if cpa_on:
-            out["any_attempted"] = True
-            out["cpa"] = {"ok": False, "error": f"Codex token 刷新失败: {e}"}
-        if sub2_on:
-            out["any_attempted"] = True
-            out["sub2api"] = {"ok": False, "error": f"Codex token 刷新失败: {e}"}
-        return out
+        cpa_on = False
+
+    needs_fresh_token = cpa_on or (sub2_on and auth_mode != "agent_identity")
+    if needs_fresh_token:
+        # ─ 关键：先用 refresh_token 换 Codex 风格 access_token ─
+        try:
+            log("[exporter] 用 refresh_token 换新的 Codex access_token...", "info")
+            fresh = refresh_codex_token(cred.get("refresh_token", ""))
+            cred = {
+                **cred,
+                "access_token":  fresh["access_token"],
+                "refresh_token": fresh.get("refresh_token") or cred.get("refresh_token"),
+                "id_token":      fresh.get("id_token") or cred.get("id_token", ""),
+            }
+            log(
+                f"[exporter] ✅ Codex token 刷新成功 "
+                f"(access_token len={len(fresh['access_token'])} "
+                f"id_token len={len(fresh.get('id_token') or '')})",
+                "ok",
+            )
+        except Exception as e:
+            log(f"[exporter] ❌ Codex token 刷新失败，无法导出: {e}", "error")
+            if cpa_on:
+                out["any_attempted"] = True
+                out["cpa"] = {"ok": False, "error": f"Codex token 刷新失败: {e}"}
+            if sub2_on:
+                out["any_attempted"] = True
+                out["sub2api"] = {"ok": False, "error": f"Codex token 刷新失败: {e}"}
+            return out
 
     if cpa_on:
         out["any_attempted"] = True
@@ -710,7 +798,7 @@ def run_exports(cred: dict, *,
     if sub2_on:
         out["any_attempted"] = True
         try:
-            out["sub2api"] = export_to_sub2api(cred, sub2api_cfg, log_fn=log)
+            out["sub2api"] = export_to_sub2api(cred, sub2api_cfg, mode=auth_mode, log_fn=log)
         except Exception as e:
             log(f"[SUB2API] 导出异常: {e}", "error")
             out["sub2api"] = {"ok": False, "error": str(e)}
