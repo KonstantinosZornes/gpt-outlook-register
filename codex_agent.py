@@ -1,13 +1,17 @@
-"""Codex Agent Identity 注册核心逻辑。
+"""Codex Agent Identity 注册（核心库）。
 
 通过 ChatGPT accessToken + Ed25519 密钥对，调用 /v1/agent/register
 获取 agent_runtime_id，生成 Codex CLI 可用的 auth.json。
+绕过 add-phone 限制，不走 OAuth 流程。
+
+原始脚本 by 久雾，集成适配 by DangoMeow。
 """
 from __future__ import annotations
 
 import base64
 import json
 import logging
+import platform
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -21,9 +25,14 @@ from cryptography.hazmat.primitives.serialization import (
 logger = logging.getLogger(__name__)
 
 AUTHAPI_BASE = "https://auth.openai.com/api/accounts"
-AGENT_VERSION = "0.138.0-alpha.6"
+AGENT_VERSION = "0.144.6"
 AGENT_HARNESS_ID = "codex-cli"
-RUNNING_LOCATION = "local"
+
+
+def _running_location() -> str:
+    os_name = platform.system().lower()
+    os_map = {"windows": "windows", "linux": "linux", "darwin": "macos"}
+    return f"cli-{os_map.get(os_name, os_name)}"
 
 
 def generate_ed25519_keypair() -> tuple[str, str]:
@@ -35,7 +44,7 @@ def generate_ed25519_keypair() -> tuple[str, str]:
         format=PrivateFormat.PKCS8,
         encryption_algorithm=NoEncryption(),
     )
-    private_key_b64 = base64.b64encode(pkcs8_der).decode("ascii")
+    private_key_b64 = base64.b64encode(pkcs8_der).decode()
 
     pub_bytes = private_key.public_key().public_bytes(
         encoding=Encoding.Raw,
@@ -47,13 +56,44 @@ def generate_ed25519_keypair() -> tuple[str, str]:
     blob.extend(ssh_header)
     blob.extend(len(pub_bytes).to_bytes(4, "big"))
     blob.extend(pub_bytes)
-    public_key_ssh = f"ssh-ed25519 {base64.b64encode(bytes(blob)).decode('ascii')}"
+    public_key_ssh = f"ssh-ed25519 {base64.b64encode(bytes(blob)).decode()}"
 
     return private_key_b64, public_key_ssh
 
 
-def register_codex_agent(session, access_token: str, public_key_ssh: str) -> str:
+def _create_agent_session(proxy: str = ""):
+    """创建独立的 HTTP session（curl_cffi 无指纹模拟，不伪装浏览器）。"""
+    try:
+        from curl_cffi.requests import Session as CffiSession
+        s = CffiSession()
+        s.trust_env = False
+        if proxy:
+            p = proxy
+            if p.startswith("socks5://"):
+                p = "socks5h://" + p[len("socks5://"):]
+            s.proxies = {"https": p, "http": p}
+        else:
+            s.proxies = {"https": "", "http": ""}
+        return s
+    except ImportError:
+        import requests as _req
+        s = _req.Session()
+        s.trust_env = False
+        if proxy:
+            p = proxy
+            if p.startswith("socks5://"):
+                p = "socks5h://" + p[len("socks5://"):]
+            s.proxies = {"https": p, "http": p}
+        return s
+
+
+def register_codex_agent(
+    access_token: str,
+    public_key_ssh: str,
+    proxy: str = "",
+) -> str:
     """调用 /v1/agent/register 注册 agent，返回 agent_runtime_id。"""
+    session = _create_agent_session(proxy)
     resp = session.post(
         f"{AUTHAPI_BASE}/v1/agent/register",
         headers={
@@ -64,9 +104,11 @@ def register_codex_agent(session, access_token: str, public_key_ssh: str) -> str
             "abom": {
                 "agent_version": AGENT_VERSION,
                 "agent_harness_id": AGENT_HARNESS_ID,
-                "running_location": RUNNING_LOCATION,
+                "running_location": _running_location(),
             },
             "agent_public_key": public_key_ssh,
+            "capabilities": ["responsesapi"],
+            "ttl": None,
         },
         timeout=15,
     )

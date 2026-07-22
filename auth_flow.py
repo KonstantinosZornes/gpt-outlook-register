@@ -1392,9 +1392,9 @@ class AuthFlow:
             logger.info("尝试 Agent Identity 注册（绕过 add-phone）...")
             private_key_b64, public_key_ssh = generate_ed25519_keypair()
             agent_runtime_id = register_codex_agent(
-                self.session,
                 self.result.access_token,
                 public_key_ssh,
+                proxy=self.config.proxy or "",
             )
             self.result.agent_runtime_id = agent_runtime_id
             self.result.agent_private_key = private_key_b64
