@@ -561,9 +561,22 @@
       <p class="hint">
         按供应商 + 国家累计统计接码结果。成功 = OpenAI phone OTP validate 通过；失败 = 号码被拒、等码超时或流程清理未完成。
       </p>
+      <div class="row" style="margin-bottom:8px;gap:8px;flex-wrap:wrap">
+        <label style="font-size:13px">供应商
+          <select id="smsStatsProviderFilter" style="margin-left:4px">
+            <option value="">全部</option>
+            <option value="smsbower">smsbower</option>
+            <option value="herosms">herosms</option>
+            <option value="5sim">5sim</option>
+          </select>
+        </label>
+        <span id="smsStatsCount" style="font-size:12px;color:var(--pink-dark);margin-left:4px"></span>
+      </div>
       <table id="smsStatsTable">
         <thead><tr>
-          <th>供应商</th><th>国家</th><th>总次数</th><th>成功次数</th><th>失败次数</th><th>成功率</th><th>更新时间</th>
+          <th>供应商</th><th>国家</th><th>总次数</th><th>成功次数</th><th>失败次数</th>
+          <th class="sortable" data-sort="success_rate" id="smsStatsRateHeader" title="点击排序">成功率</th>
+          <th>更新时间</th>
         </tr></thead>
         <tbody></tbody>
       </table>

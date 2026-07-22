@@ -327,6 +327,14 @@ td .status {
 .sms-rate.warn { background: #fff4e1; color: var(--warn); }
 .sms-rate.bad { background: #fce4e4; color: var(--bad); }
 
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+th.sortable:hover { color: var(--pink-dark); }
+th.sortable.sorted { color: var(--pink-dark); }
+
 td button { padding: 3px 8px; font-size: 11px; margin-right: 4px; }
 
 /* 模态框 */

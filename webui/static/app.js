@@ -333,38 +333,88 @@ $("#btnClearAllExhausted")?.addEventListener("click", async () => {
   }
 });
 
+let _smsStatsItems = [];
+// success_rate 排序："" | "desc" | "asc"
+let _smsStatsRateSort = "";
+
+function _smsStatsProviderFilter() {
+  return ($("#smsStatsProviderFilter")?.value || "").trim().toLowerCase();
+}
+
+function _updateSmsStatsRateHeader() {
+  const th = $("#smsStatsRateHeader");
+  if (!th) return;
+  const arrow = _smsStatsRateSort === "desc" ? " ↓" : (_smsStatsRateSort === "asc" ? " ↑" : "");
+  th.textContent = "成功率" + arrow;
+  th.classList.toggle("sorted", !!_smsStatsRateSort);
+}
+
+function _renderSmsStatsRows() {
+  const tb = $("#smsStatsTable tbody");
+  const countEl = $("#smsStatsCount");
+  if (!tb) return;
+
+  const pk = _smsStatsProviderFilter();
+  let items = _smsStatsItems.slice();
+  if (pk) {
+    items = items.filter((r) => String(r.provider || "").toLowerCase() === pk);
+  }
+  if (_smsStatsRateSort === "desc") {
+    items.sort((a, b) => Number(b.success_rate || 0) - Number(a.success_rate || 0));
+  } else if (_smsStatsRateSort === "asc") {
+    items.sort((a, b) => Number(a.success_rate || 0) - Number(b.success_rate || 0));
+  }
+
+  tb.innerHTML = "";
+  if (countEl) countEl.textContent = items.length ? `${items.length} 条` : "无";
+  if (!items.length) {
+    tb.innerHTML = `<tr><td colspan="7">${_smsStatsItems.length ? "当前筛选无数据" : "暂无接码统计"}</td></tr>`;
+    return;
+  }
+  for (const r of items) {
+    const rate = Number(r.success_rate || 0);
+    const rateCls = rate >= 80 ? "ok" : (rate >= 50 ? "warn" : "bad");
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><code>${escapeHtml(r.provider)}</code></td>
+      <td>${escapeHtml(r.country_label || r.country || "-")}</td>
+      <td>${Number(r.total_count || 0)}</td>
+      <td>${Number(r.success_count || 0)}</td>
+      <td>${Number(r.fail_count || 0)}</td>
+      <td><span class="sms-rate ${rateCls}">${rate.toFixed(2)}%</span></td>
+      <td>${fmtTime(r.updated_at)}</td>
+    `;
+    tb.appendChild(tr);
+  }
+}
+
 async function refreshSmsStats() {
   const tb = $("#smsStatsTable tbody");
   if (!tb) return;
   tb.innerHTML = `<tr><td colspan="7">加载中...</td></tr>`;
   try {
     const { items } = await api("/api/sms_stats");
-    tb.innerHTML = "";
-    if (!items.length) {
-      tb.innerHTML = `<tr><td colspan="7">暂无接码统计</td></tr>`;
-      return;
-    }
-    for (const r of items) {
-      const rate = Number(r.success_rate || 0);
-      const rateCls = rate >= 80 ? "ok" : (rate >= 50 ? "warn" : "bad");
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td><code>${escapeHtml(r.provider)}</code></td>
-        <td>${escapeHtml(r.country_label || r.country || "-")}</td>
-        <td>${Number(r.total_count || 0)}</td>
-        <td>${Number(r.success_count || 0)}</td>
-        <td>${Number(r.fail_count || 0)}</td>
-        <td><span class="sms-rate ${rateCls}">${rate.toFixed(2)}%</span></td>
-        <td>${fmtTime(r.updated_at)}</td>
-      `;
-      tb.appendChild(tr);
-    }
+    _smsStatsItems = items || [];
+    _updateSmsStatsRateHeader();
+    _renderSmsStatsRows();
   } catch (e) {
+    _smsStatsItems = [];
     tb.innerHTML = `<tr><td colspan="7">加载失败：${escapeHtml(e.message)}</td></tr>`;
+    const countEl = $("#smsStatsCount");
+    if (countEl) countEl.textContent = "";
   }
 }
 
 $("#btnRefreshSmsStats")?.addEventListener("click", refreshSmsStats);
+$("#smsStatsProviderFilter")?.addEventListener("change", _renderSmsStatsRows);
+$("#smsStatsRateHeader")?.addEventListener("click", () => {
+  // 默认 → 降序 → 升序 → 默认
+  if (_smsStatsRateSort === "") _smsStatsRateSort = "desc";
+  else if (_smsStatsRateSort === "desc") _smsStatsRateSort = "asc";
+  else _smsStatsRateSort = "";
+  _updateSmsStatsRateHeader();
+  _renderSmsStatsRows();
+});
 
 // ──────────────────────── 号池列表 ────────────────────────
 
