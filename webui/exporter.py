@@ -36,7 +36,9 @@ CODEX_SCOPE = "openid email profile offline_access"
 
 # 默认值
 DEFAULT_TIMEOUT = 30
+# 导出到 SUB2API 时固定：组 id=[2]，代理 id=1
 DEFAULT_SUB2API_GROUP_IDS = [2]
+DEFAULT_SUB2API_PROXY_ID = 1
 SUB2API_DEFAULT_EXPIRES_IN = 863999  # 跟 any-auto-register 一致
 MAX_ATTEMPTS = 3
 RETRY_DELAYS_S = [3.0, 7.0]
@@ -480,6 +482,7 @@ def build_sub2api_payload(cred: dict, group_ids: list[int]) -> dict:
         },
         "extra": {"email": email},
         "group_ids": list(group_ids) if group_ids else list(DEFAULT_SUB2API_GROUP_IDS),
+        "proxy_id": DEFAULT_SUB2API_PROXY_ID,
         "concurrency": 10,
         "priority": 1,
         "auto_pause_on_expired": True,
@@ -531,9 +534,9 @@ def _build_sub2api_agent_identity_payload(cred: dict, group_ids: list[int]) -> t
         "content": json.dumps(auth_json, ensure_ascii=False),
         "name": email or "codex-agent",
         "update_existing": True,
+        "group_ids": list(group_ids) if group_ids else list(DEFAULT_SUB2API_GROUP_IDS),
+        "proxy_id": DEFAULT_SUB2API_PROXY_ID,
     }
-    if group_ids:
-        payload["group_ids"] = list(group_ids)
     return payload, email
 
 
@@ -553,7 +556,9 @@ def export_to_sub2api(cred: dict, cfg: dict, *,
     if not api_key:
         raise RuntimeError("SUB2API 未配置 API Key")
 
-    group_ids = _parse_group_ids(cfg.get("sub2api_group_ids"))
+    # 固定：组 id=[2]，代理 id=1（忽略配置里的 group_ids）
+    group_ids = list(DEFAULT_SUB2API_GROUP_IDS)
+    proxy_id = DEFAULT_SUB2API_PROXY_ID
     timeout = int(cfg.get("sub2api_timeout") or DEFAULT_TIMEOUT)
     cffi = _import_cffi()
 
@@ -570,6 +575,8 @@ def export_to_sub2api(cred: dict, cfg: dict, *,
         payload = build_sub2api_payload(cred, group_ids)
         email = payload.get("name") or "unknown"
         url = f"{api_url}/api/v1/admin/accounts"
+    payload["group_ids"] = group_ids
+    payload["proxy_id"] = proxy_id
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/plain, */*",
@@ -582,7 +589,7 @@ def export_to_sub2api(cred: dict, cfg: dict, *,
         try:
             log(
                 f"[SUB2API] 第 {attempt}/{MAX_ATTEMPTS} 次上传 {email} "
-                f"(group_ids={group_ids})...",
+                f"(group_ids={group_ids}, proxy_id={proxy_id})...",
                 "info",
             )
             resp = cffi.post(
