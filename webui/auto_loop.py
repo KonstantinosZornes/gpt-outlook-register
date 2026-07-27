@@ -73,6 +73,8 @@ class AutoLoopController:
         self._proxy_start_offset: int = 0
         self._accounts_started: int = 0
         self._current_batch_proxy: str = ""
+        # 目标成功数：0 = 不限量（保持旧行为）；>0 时累计成功达标即自动停止
+        self._target_count: int = 0
 
     # ──────────────────────── 公共 API ────────────────────────
 
@@ -112,6 +114,8 @@ class AutoLoopController:
                 self._proxy_rr_index = 0
             self._accounts_started = 0
             self._current_batch_proxy = ""
+            # 目标成功数（0=不限量）
+            self._target_count = max(0, int(self._options.get("target_count") or 0))
             # 启 manage 线程
             self._manage_thread = threading.Thread(
                 target=self._manage_loop, daemon=True, name="auto-loop-manage"
@@ -123,6 +127,7 @@ class AutoLoopController:
             "state": self._state,
             "concurrency": self._concurrency,
             "proxy_pool_size": len(self._proxy_pool),
+            "target_count": self._target_count,
         }
 
     def pause(self) -> dict:
@@ -194,6 +199,11 @@ class AutoLoopController:
                 "elapsed": (time.time() - self._started_at) if self._started_at else 0,
                 "registered_ok": self._registered_ok,
                 "registered_fail": self._registered_fail,
+                "target_count": self._target_count,
+                "remaining": (
+                    max(0, self._target_count - self._registered_ok)
+                    if self._target_count else None
+                ),
                 "concurrency": self._concurrency,
                 "proxy_pool_size": len(self._proxy_pool),
                 "auto_rotate_proxy": self._auto_rotate_proxy,
@@ -311,10 +321,25 @@ class AutoLoopController:
             self._last_message = (
                 f"累计 ok={self._registered_ok} fail={self._registered_fail}"
             )
+            # 目标数量：累计成功达标 → 触发停止（stop_event 幂等，多 worker 同时命中也安全）
+            target_reached = bool(
+                self._target_count and self._registered_ok >= self._target_count
+            )
             trigger_break = (
                 self._consecutive_network_fails >= self._circuit_break_threshold
                 and self._state == AutoLoopState.RUNNING
             )
+
+        if target_reached:
+            with self._lock:
+                self._stop_event.set()
+                self._last_message = (
+                    f"🎯 已达目标 {self._target_count} 个，自动停止"
+                    f"（成功 {self._registered_ok} / 失败 {self._registered_fail}）"
+                )
+            logger.info(f"已达目标 {self._target_count} 个成功，触发自动停止")
+            self._broadcast("state", self._snapshot())
+            return
 
         if trigger_break:
             with self._lock:
@@ -381,6 +406,16 @@ class AutoLoopController:
                 while self._pause_event.is_set() and not self._stop_event.is_set():
                     time.sleep(0.5)
                 if self._stop_event.is_set():
+                    return
+
+            # 目标数量闸门：已成功 + 在跑的（复用 _worker_status 当在跑数）≥ 目标 → 本 worker 退出
+            with self._lock:
+                if self._target_count and (
+                    self._registered_ok + len(self._worker_status) >= self._target_count
+                ):
+                    logger.info(
+                        f"[worker-{worker_id}] 目标 {self._target_count} 已锁定，退出"
+                    )
                     return
 
             # 余额下限检查：每个 worker 在 claim 新号前查一次接码平台余额，

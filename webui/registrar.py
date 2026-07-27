@@ -94,6 +94,7 @@ _NETWORK_ERROR_PATTERNS = [
     "余额不足", "sms 余额", "接码平台余额",
     "codex_oauth_refresh_token_missing",
     "codex_agent_identity_missing",
+    "invalid_state",
 ]
 
 

@@ -21,7 +21,7 @@ from typing import Optional, Any
 from urllib.parse import urlparse, parse_qs, parse_qsl, urljoin, urlencode, urlunparse
 
 from config import Config
-from fingerprint import generate_fingerprint
+from fingerprint import generate_fingerprint, ua_for_impersonate
 from mail_outlook import OutlookMailProvider as MailProvider
 from http_client import create_http_session, USER_AGENT
 
@@ -70,11 +70,13 @@ class AuthFlow:
 
     def __init__(self, config: Config, sms_callback: Optional[Any] = None):
         self.config = config
-        self._fingerprint = generate_fingerprint()
+        self._country_code = ""  # IP 地理国家码，check_proxy() 时填充
+        self._fingerprint = generate_fingerprint()  # 先生成默认指纹
         self._ua = self._fingerprint["user_agent"]
-        self._impersonate_candidates = [
-            self._fingerprint["impersonate"], "safari17_0", "safari15_5",
-        ]
+        self._impersonate_candidates = self._fingerprint.get(
+            "fallback_impersonates",
+            [self._fingerprint["impersonate"], "safari17_0", "safari15_5"],
+        )
         self._impersonate_idx = 0
         self.session = create_http_session(
             proxy=config.proxy,
@@ -109,9 +111,10 @@ class AuthFlow:
             "1", "true", "yes", "on"
         )
         self._trace_dump_path = ""
-        logger.info(
+        logger.debug(
             f"指纹: impersonate={self._fingerprint['impersonate']} "
-            f"screen={self._fingerprint['screen']} lang={self._fingerprint['lang']}"
+            f"screen={self._fingerprint['screen']} lang={self._fingerprint['lang']} "
+            f"ua={self._ua}"
         )
 
     def _build_chatgpt_cookie_header(self) -> str:
@@ -453,7 +456,7 @@ class AuthFlow:
         if idt:
             self.result.id_token = idt
 
-        logger.info(
+        logger.debug(
             "client_auth_session_dump(%s) 成功: top_keys=%s cas_keys=%s session_id=%s refresh=%s verifier=%s",
             stage or "default",
             list(data.keys())[:12],
@@ -829,7 +832,7 @@ class AuthFlow:
                 logger.warning("Codex 登录推进需要 OTP，但未提供 mail_provider")
                 return continue_url or ""
             try:
-                otp_timeout = max(30, int(os.getenv("OTP_TIMEOUT", "60")))
+                otp_timeout = max(10, int(os.getenv("OTP_TIMEOUT", "60")))
             except Exception:
                 otp_timeout = 180
             otp_sent_at = time.time()
@@ -1279,7 +1282,7 @@ class AuthFlow:
         """
         allow_retry = self._env_flag("OAUTH_CODEX_RT_ALLOW_RETRY", "0")
         if self._codex_rt_attempted and (not allow_retry):
-            logger.info("Codex RT 本轮已尝试过，跳过重复尝试（可用 OAUTH_CODEX_RT_ALLOW_RETRY=1 强制重试）")
+            logger.debug("Codex RT 本轮已尝试过，跳过重复尝试")
             return False
         self._codex_rt_attempted = True
 
@@ -1364,7 +1367,7 @@ class AuthFlow:
                     )
 
             if not callback_url:
-                logger.warning("Codex OAuth 未捕获 callback code, final=%s", (final_url or "")[:180])
+                logger.debug("Codex OAuth 未捕获 callback code, final=%s", (final_url or "")[:180])
                 return False
             return self._exchange_codex_callback_code(
                 callback_url=callback_url,
@@ -1512,12 +1515,13 @@ class AuthFlow:
         return out
 
     def _rotate_impersonate_session(self) -> bool:
-        """仅在 curl_cffi 指纹模式内切换 UA 指纹版本重试。"""
+        """仅在 curl_cffi 指纹模式内切换 UA 指纹版本重试，同时联动更新 UA。"""
         if self._impersonate_idx >= len(self._impersonate_candidates) - 1:
             return False
         self._impersonate_idx += 1
         imp = self._impersonate_candidates[self._impersonate_idx]
-        logger.warning(f"TLS 异常，切换指纹重试: impersonate={imp}")
+        self._ua = ua_for_impersonate(imp, self._ua)
+        logger.warning(f"TLS 异常，切换指纹重试: impersonate={imp}, ua={self._ua[:60]}...")
         self.session = create_http_session(
             proxy=self.config.proxy, impersonate=imp, user_agent=self._ua,
         )
@@ -1572,11 +1576,26 @@ class AuthFlow:
             "Origin": origin,
             "User-Agent": self._ua,
             "Accept-Language": fp["lang_full"],
+            "Accept-Encoding": "gzip, deflate, br",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
         }
         if fp.get("sec_ch_ua"):
             headers["sec-ch-ua"] = fp["sec_ch_ua"]
             headers["sec-ch-ua-mobile"] = fp.get("sec_ch_ua_mobile") or "?0"
             headers["sec-ch-ua-platform"] = fp["sec_ch_ua_platform"]
+            # Client Hints 全套（仅 Chromium 有值，其他浏览器为空串不下发）
+            if fp.get("sec_ch_ua_full_version_list"):
+                headers["sec-ch-ua-full-version-list"] = fp["sec_ch_ua_full_version_list"]
+            if fp.get("sec_ch_ua_arch"):
+                headers["sec-ch-ua-arch"] = fp["sec_ch_ua_arch"]
+            if fp.get("sec_ch_ua_bitness"):
+                headers["sec-ch-ua-bitness"] = fp["sec_ch_ua_bitness"]
+            if fp.get("sec_ch_ua_model"):
+                headers["sec-ch-ua-model"] = fp["sec_ch_ua_model"]
+            if fp.get("sec_ch_ua_platform_version"):
+                headers["sec-ch-ua-platform-version"] = fp["sec_ch_ua_platform_version"]
 
         # auth.openai.com 侧请求补设备标识（若可得）
         try:
@@ -1600,8 +1619,19 @@ class AuthFlow:
             if resp.status_code == 200:
                 loc = re.search(r"loc=(\w+)", resp.text)
                 ip = re.search(r"ip=([^\n]+)", resp.text)
+                country_code = loc.group(1) if loc else ""
                 logger.info(f"网络正常 - IP: {ip.group(1) if ip else 'N/A'}, "
-                            f"地区: {loc.group(1) if loc else 'N/A'}")
+                            f"地区: {country_code or 'N/A'}")
+
+                # IP 地理联动：检测到国家码后，重新生成指纹（带时区/语言联动）
+                if country_code and country_code != self._country_code:
+                    self._country_code = country_code
+                    # 用原 RNG 种子重新生成（保证会话内硬件一致性）
+                    import random
+                    session_seed = id(self.session) % (2**32)  # 用 session 对象地址做种子
+                    rng = random.Random(session_seed)
+                    self._fingerprint = generate_fingerprint(rng=rng, country_code=country_code)
+                    self._ua = self._fingerprint["user_agent"]
             else:
                 logger.warning(f"网络探测异常: cloudflare trace {resp.status_code}")
 
@@ -1660,7 +1690,7 @@ class AuthFlow:
         if not csrf:
             raise RuntimeError("CSRF Token 获取失败")
         self.result.csrf_token = csrf
-        logger.info(f"CSRF Token: {csrf[:20]}...")
+        logger.debug(f"CSRF Token: {csrf[:20]}...")
         return csrf
 
     # ── Step 3: 获取 auth URL ──
@@ -1687,7 +1717,7 @@ class AuthFlow:
         self._remember_oauth_params(auth_url)
         auth_url = self._inject_pkce_into_auth_url(auth_url)
         self._remember_oauth_params(auth_url)
-        logger.info(f"Auth URL: {auth_url[:80]}...")
+        logger.debug(f"Auth URL: {auth_url[:80]}...")
         return auth_url
 
     # ── Step 4: OAuth 初始化 & 获取 device_id ──
@@ -1730,10 +1760,41 @@ class AuthFlow:
             logger.warning(f"未从响应中获取 device_id，使用生成值: {device_id}")
 
         self.result.device_id = device_id
-        logger.info(f"Device ID: {device_id}")
+        logger.debug(f"Device ID: {device_id}")
         return device_id
 
     # ── Step 5: 获取 Sentinel Token ──
+    def _sentinel_fp_kwargs(self) -> dict:
+        """从 self._fingerprint 抽出 sentinel 需要的指纹/硬件字段。
+
+        保证 4 处 sentinel 调用（authorize_continue / username_password_create /
+        create_account 等）用的是同一套一致画像——UA↔platform↔vendor↔硬件全程不变。
+        """
+        fp = self._fingerprint or {}
+        return {
+            "user_agent": self._ua,
+            "sec_ch_ua": fp.get("sec_ch_ua", ""),
+            "sec_ch_ua_platform": fp.get("sec_ch_ua_platform", ""),
+            "sec_ch_ua_mobile": fp.get("sec_ch_ua_mobile", ""),
+            # Client Hints 全套（仅 Chromium 有值）
+            "sec_ch_ua_full_version_list": fp.get("sec_ch_ua_full_version_list", ""),
+            "sec_ch_ua_arch": fp.get("sec_ch_ua_arch", ""),
+            "sec_ch_ua_bitness": fp.get("sec_ch_ua_bitness", ""),
+            "sec_ch_ua_model": fp.get("sec_ch_ua_model", ""),
+            "sec_ch_ua_platform_version": fp.get("sec_ch_ua_platform_version", ""),
+            "screen": fp.get("screen", ""),
+            "lang": fp.get("lang", ""),
+            "lang_full": fp.get("lang_full", ""),
+            "browser_type": fp.get("browser_type", ""),
+            "navigator_platform": fp.get("navigator_platform", ""),
+            "navigator_vendor": fp.get("navigator_vendor"),
+            "hardware_concurrency": fp.get("hardware_concurrency", 0),
+            "device_memory": fp.get("device_memory"),
+            "max_touch_points": fp.get("max_touch_points", 0),
+            "device_pixel_ratio": fp.get("device_pixel_ratio", 0.0),
+            "timezone": fp.get("timezone", ""),  # IP 联动时区
+        }
+
     def get_sentinel_token(self, device_id: str) -> str:
         logger.info("[4/10] 获取 Sentinel Token (PoW)...")
         from sentinel import get_sentinel_token
@@ -1741,14 +1802,10 @@ class AuthFlow:
             self.session,
             device_id=device_id,
             flow="authorize_continue",
-            user_agent=self._ua,
-            sec_ch_ua=self._fingerprint["sec_ch_ua"],
-            screen=self._fingerprint["screen"],
-            lang=self._fingerprint["lang"],
-            lang_full=self._fingerprint["lang_full"],
+            **self._sentinel_fp_kwargs(),
         )
         self._last_sentinel_token = token or ""
-        logger.info("Sentinel Token 获取成功")
+        logger.debug("Sentinel Token 获取成功")
         return token
 
     # ── Step 6: 提交注册邮箱 ──
@@ -1870,9 +1927,10 @@ class AuthFlow:
             try:
                 from sentinel import get_sentinel_token as _get_st
                 token = _get_st(self.session, device_id=self.result.device_id,
-                                flow="username_password_create")
+                                flow="username_password_create",
+                                **self._sentinel_fp_kwargs())
                 self._last_sentinel_token = token or ""
-                logger.info("Sentinel Token 获取成功")
+                logger.debug("Sentinel Token 获取成功")
             except Exception as e:
                 logger.warning(f"注册前刷新 sentinel 失败: {e}")
 
@@ -2064,9 +2122,10 @@ class AuthFlow:
             try:
                 from sentinel import get_sentinel_token as _get_st
                 token = _get_st(self.session, device_id=self.result.device_id,
-                                flow="create_account")
+                                flow="create_account",
+                                **self._sentinel_fp_kwargs())
                 self._last_sentinel_token = token or ""
-                logger.info("Sentinel Token 获取成功")
+                logger.debug("Sentinel Token 获取成功")
             except Exception as e:
                 logger.warning(f"创建账户前刷新 sentinel 失败: {e}")
         headers = self._common_headers("https://auth.openai.com/about-you")
@@ -2162,7 +2221,7 @@ class AuthFlow:
             logger.warning("/choose-an-account HTML 里没找到 us_* session id, 跳过")
             return ""
         session_id = m.group(0)
-        logger.info(f"/choose-an-account 选 session_id={session_id}")
+        logger.debug(f"/choose-an-account 选 session_id={session_id}")
         headers = self._common_headers("https://auth.openai.com/choose-an-account")
         headers["Origin"] = "https://auth.openai.com"
 
@@ -2216,11 +2275,11 @@ class AuthFlow:
                     if not next_url and loc:
                         next_url = loc
                     if next_url:
-                        logger.info(f"choose-an-account 选号成功 endpoint={url} next={next_url[:120]}")
+                        logger.debug(f"choose-an-account 选号成功 endpoint={url} next={next_url[:120]}")
                         return next_url
                     # 200 但没 continue_url：可能 set 了 cookie，直接让 caller 重 GET authorize
                     if status == 200:
-                        logger.info(f"choose-an-account POST {url} 200 OK 无 continue_url，假定 cookie 已 set")
+                        logger.debug(f"choose-an-account POST {url} 200 OK 无 continue_url，假定 cookie 已 set")
                         return current_url  # 让外层重 GET 一次，cookie 已被 server set
             except Exception as e:
                 print(f"[choose-an-account] {method} {url} [{kind}] -> EXC {e}", flush=True)
@@ -2491,7 +2550,10 @@ class AuthFlow:
           3. 兼容大小写 / 下划线变体
         access_token 取 JSON 响应里的 `accessToken`。
         """
-        logger.info("[10/10] 获取认证 Session...")
+        first_call = not getattr(self, "_auth_session_fetched", False)
+        self._auth_session_fetched = True
+        if first_call:
+            logger.info("[10/10] 获取认证 Session...")
         headers = self._common_headers("https://chatgpt.com/")
         resp = self.session.get(
             "https://chatgpt.com/api/auth/session",
@@ -2523,13 +2585,8 @@ class AuthFlow:
             self.result.access_token = access_token
         self.result.cookie_header = self._build_chatgpt_cookie_header()
 
-        logger.info(
-            f"session_token: cookie={'有(len=%d)' % len(cookie_st) if cookie_st else '无'} "
-            f"json={'有(len=%d)' % len(json_st) if json_st else '无'} "
-            f"→ 最终={'有(len=%d)' % len(session_token) if session_token else '无'}; "
-            f"access_token={'有(len=%d)' % len(access_token) if access_token else '无'}; "
-            f"json_keys={list(sess_json.keys())[:10]}"
-        )
+        _log = logger.info if first_call else logger.debug
+        _log(f"session: st={'有' if session_token else '无'} at={'有' if access_token else '无'}")
         return session_token, access_token
 
     def _consume_callback_for_session(self, callback_url: str) -> bool:
@@ -2838,7 +2895,7 @@ class AuthFlow:
                     self.send_otp()
 
             try:
-                otp_timeout = max(30, int(os.getenv("OTP_TIMEOUT", "60")))
+                otp_timeout = max(10, int(os.getenv("OTP_TIMEOUT", "60")))
             except Exception:
                 otp_timeout = 180
             otp_code = mail_provider.wait_for_otp(
@@ -2887,7 +2944,7 @@ class AuthFlow:
             continue_url = ""
 
             try:
-                otp_timeout = max(30, int(os.getenv("OTP_TIMEOUT", "60")))
+                otp_timeout = max(10, int(os.getenv("OTP_TIMEOUT", "60")))
             except Exception:
                 otp_timeout = 180
 
@@ -2933,7 +2990,7 @@ class AuthFlow:
                         self._human_delay("existing_forced_resend")
                     if forced_resend and self.kickoff_otp_delivery("existing_forced_resend"):
                         otp_sent_at = time.time()
-                        logger.info(f"已有账号验证码模式={mode}，已主动 resend OTP")
+                        logger.debug(f"已有账号验证码模式={mode}，已主动 resend OTP")
                     else:
                         # 回看短窗口，避免误读上一轮旧验证码
                         otp_sent_at = time.time() - 8
@@ -3058,7 +3115,7 @@ class AuthFlow:
         #       cookie（含 session-token），然后再 get_auth_session 拿 access_token；
         #       Codex RT exchange 用独立 authorize 链路，跟 chatgpt callback 不冲突。
         if (not refresh_only_mode) and callback_url:
-            logger.info("消费 callback 触发 NextAuth Set-Cookie (session-token) ...")
+            logger.debug("消费 callback 触发 NextAuth Set-Cookie (session-token)")
             self._consume_callback_for_session(callback_url)
 
         if not refresh_only_mode:
@@ -3127,7 +3184,7 @@ class AuthFlow:
 
         continue_url = ""
         try:
-            otp_timeout = max(30, int(os.getenv("OTP_TIMEOUT", "60")))
+            otp_timeout = max(10, int(os.getenv("OTP_TIMEOUT", "60")))
         except Exception:
             otp_timeout = 180
 

@@ -145,8 +145,10 @@ def api_import(req: ImportReq):
 
 
 @app.get("/api/accounts")
-def api_accounts(status: str = "", limit: int = 500):
-    return {"ok": True, "items": db.list_accounts(status=status, limit=limit)}
+def api_accounts(status: str = "", limit: int = 50, offset: int = 0):
+    items = db.list_accounts(status=status, limit=limit, offset=offset)
+    total = db.count_accounts(status=status)
+    return {"ok": True, "items": items, "total": total}
 
 
 @app.delete("/api/accounts/{email}")
@@ -947,6 +949,93 @@ def api_test_proxy(req: ProxyPoolTestReq):
     }
 
 
+# ──────────────────────── Plus 试用检查 ────────────────────────
+
+
+class CheckPlusReq(BaseModel):
+    emails: list[str] = Field(..., description="要检查的邮箱列表")
+    proxy: str = Field("", description="查询代理，留空直连")
+
+
+@app.post("/api/registered/check_plus")
+def api_check_plus(req: CheckPlusReq):
+    """用 access_token 查询账号的 Plus 试用状态。"""
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        raise HTTPException(500, "curl_cffi 未安装")
+
+    results = {}
+    for email in req.emails:
+        cred = db.get_registered(email)
+        if not cred:
+            results[email] = {"status": "not_found", "label": "未找到"}
+            continue
+        at = (cred.get("access_token") or "").strip()
+        if not at:
+            results[email] = {"status": "no_at", "label": "无AT"}
+            continue
+        try:
+            proxies = None
+            proxy = req.proxy.strip()
+            if proxy:
+                proxies = {"https": proxy, "http": proxy}
+            resp = cffi_requests.get(
+                "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
+                headers={
+                    "Authorization": f"Bearer {at}",
+                    "Accept": "application/json",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/145.0.0.0 Safari/537.36"
+                    ),
+                },
+                proxies=proxies,
+                impersonate="chrome110",
+                timeout=15,
+            )
+            if resp.status_code == 401:
+                results[email] = {"status": "banned", "label": "封号"}
+                continue
+            if resp.status_code != 200:
+                # HTTP 非 200/401 不记录，让前端继续显示"未检测"
+                continue
+            data = resp.json()
+            accts = data.get("accounts", {})
+            if not accts:
+                # 无账户数据不记录，让前端继续显示"未检测"
+                continue
+            info = next(iter(accts.values()))
+            acct = info.get("account", {})
+            ent = info.get("entitlement", {})
+            promo = info.get("eligible_promo_campaigns", {})
+            is_deactivated = acct.get("is_deactivated", False)
+            if is_deactivated:
+                results[email] = {"status": "banned", "label": "封号"}
+                continue
+            plan = acct.get("plan_type", "free")
+            has_sub = ent.get("has_active_subscription", False)
+            has_plus_promo = "plus" in promo and promo["plus"].get("id") == "plus-1-month-free"
+            if plan == "plus" or has_sub:
+                results[email] = {"status": "plus_active", "label": "Plus生效中"}
+            elif has_plus_promo:
+                results[email] = {"status": "plus_eligible", "label": "可领Plus试用"}
+            else:
+                results[email] = {"status": "free", "label": "Free"}
+        except Exception:
+            # 所有异常（包括 curl 网络错误）都不记录，让前端继续显示"未检测"
+            pass
+
+    import time as _time
+    checked_at = _time.time()
+    for email, info in results.items():
+        if info["status"] not in ("not_found", "no_at"):
+            db.update_plus_check(email, {**info, "checked_at": checked_at})
+
+    return {"ok": True, "results": results}
+
+
 # ──────────────────────── auto-loop ────────────────────────
 
 
@@ -958,11 +1047,12 @@ class AutoLoopStartReq(BaseModel):
     proxy: str = ""              # 单代理（concurrency=1 + 无代理池时用）
     proxy_pool: str = ""         # 多代理池（每行一个）；优先于 proxy
     concurrency: int = 1         # 并发 worker 数（1-20）
-    otp_timeout: int = 180
+    otp_timeout: int = 10
     allow_existing_login: bool = True
     cool_down_seconds: float = 3.0  # 每个 worker 跑完后冷却（防风控）
     auto_rotate_proxy: bool = True   # 是否按账号批量轮换代理
     rotate_proxy_every: int = 5      # 每 N 个账号轮换一次代理
+    target_count: int = 0        # 目标成功数（0=不限量，达标自动停止）
 
 
 @app.post("/api/auto/start")

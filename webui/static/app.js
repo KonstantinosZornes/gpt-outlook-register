@@ -121,7 +121,7 @@ $("#btnImport").addEventListener("click", async () => {
     $("#importResult").className = "result ok";
     $("#importText").value = "";
     refreshStats();
-    refreshPool();
+    refreshPool(true);
   } catch (e) {
     $("#importResult").textContent = "❌ " + e.message;
     $("#importResult").className = "result bad";
@@ -139,7 +139,7 @@ $("#btnRun").addEventListener("click", async () => {
   const opts = {
     email: email || null,
     proxy: $("#regProxy").value.trim(),
-    otp_timeout: parseInt($("#regOtpTimeout").value || "180", 10),
+    otp_timeout: parseInt($("#regOtpTimeout").value || "10", 10),
     want_access_token: true,
     want_session_token: true,
     want_refresh_token: true,
@@ -418,9 +418,26 @@ $("#smsStatsRateHeader")?.addEventListener("click", () => {
 
 // ──────────────────────── 号池列表 ────────────────────────
 
-async function refreshPool() {
+const POOL_PAGE_SIZE = 20;
+let _poolPage = 1;
+let _poolTotal = 0;
+
+function _poolTotalPages() { return Math.max(1, Math.ceil(_poolTotal / POOL_PAGE_SIZE)); }
+
+function _updatePoolPagination() {
+  const pages = _poolTotalPages();
+  $("#poolPageInfo").textContent = `第 ${_poolPage} 页 / 共 ${pages} 页（${_poolTotal} 条）`;
+  $("#poolPrevPage").disabled = _poolPage <= 1;
+  $("#poolNextPage").disabled = _poolPage >= pages;
+}
+
+async function refreshPool(resetPage) {
+  if (resetPage === true) _poolPage = 1;
   const status = $("#poolFilter").value;
-  const { items } = await api(`/api/accounts?status=${encodeURIComponent(status)}`);
+  const offset = (_poolPage - 1) * POOL_PAGE_SIZE;
+  const { items, total } = await api(`/api/accounts?status=${encodeURIComponent(status)}&limit=${POOL_PAGE_SIZE}&offset=${offset}`);
+  _poolTotal = total;
+  if (_poolPage > _poolTotalPages()) _poolPage = _poolTotalPages();
   const tb = $("#poolTable tbody");
   tb.innerHTML = "";
   for (const r of items) {
@@ -441,9 +458,12 @@ async function refreshPool() {
   }
   $("#poolSelectAll").checked = false;
   _updateSelCount();
+  _updatePoolPagination();
 }
-$("#btnRefreshPool").addEventListener("click", refreshPool);
-$("#poolFilter").addEventListener("change", refreshPool);
+$("#btnRefreshPool").addEventListener("click", () => refreshPool(false));
+$("#poolPrevPage").addEventListener("click", () => { if (_poolPage > 1) { _poolPage--; refreshPool(); } });
+$("#poolNextPage").addEventListener("click", () => { if (_poolPage < _poolTotalPages()) { _poolPage++; refreshPool(); } });
+$("#poolFilter").addEventListener("change", () => refreshPool(true));
 
 $("#btnResetFailed").addEventListener("click", async () => {
   if (!confirm("把所有 failed 号重置为 available？")) return;
@@ -589,6 +609,8 @@ $("#poolTable").addEventListener("click", async (e) => {
 
 // ──────────────────────── 注册结果列表（分页） ────────────────────────
 
+const _plusCache = {};
+
 const REG_PAGE_SIZE = 20;
 let _regPage = 1;
 let _regTotal = 0;
@@ -604,7 +626,7 @@ function _updateRegPagination() {
 
 async function refreshRegistered(resetPage) {
   if (resetPage === true) _regPage = 1;
-  const filter = document.querySelector("input[name='regFilter']:checked")?.value || "all";
+  const filter = $("#regFilter").value || "all";
   const offset = (_regPage - 1) * REG_PAGE_SIZE;
   const { items, total } = await api(`/api/registered?limit=${REG_PAGE_SIZE}&offset=${offset}&filter=${filter}`);
   _regTotal = total;
@@ -614,9 +636,14 @@ async function refreshRegistered(resetPage) {
   tb.innerHTML = "";
   for (const r of items) {
     const tr = document.createElement("tr");
+    const cached = _plusCache[r.email] || r.plus_check;
+    const plusCell = cached
+      ? `<span class="plus-status plus-${cached.status}">${cached.label}</span>`
+      : `<span class="plus-status plus-unknown">—</span>`;
     tr.innerHTML = `
       <td><input type="checkbox" class="reg-check" data-email="${r.email}"></td>
       <td>${r.email}</td>
+      <td data-plus-email="${r.email}">${plusCell}</td>
       <td>${r.at_len > 0 ? `<button class="copy-cell" data-email="${r.email}" data-field="access_token" title="点击复制 access_token">✅ ${r.at_len} 📋</button>` : "—"}</td>
       <td>${r.st_len > 0 ? `<button class="copy-cell" data-email="${r.email}" data-field="session_token" title="点击复制 session_token">✅ ${r.st_len} 📋</button>` : "—"}</td>
       <td>${r.rt_len > 0 ? `<button class="copy-cell" data-email="${r.email}" data-field="refresh_token" title="点击复制 refresh_token">✅ ${r.rt_len} 📋</button>` : "—"}</td>
@@ -637,10 +664,98 @@ $("#btnRefreshReg").addEventListener("click", () => refreshRegistered(false));
 $("#regPrevPage").addEventListener("click", () => { if (_regPage > 1) { _regPage--; refreshRegistered(); } });
 $("#regNextPage").addEventListener("click", () => { if (_regPage < _regTotalPages()) { _regPage++; refreshRegistered(); } });
 
-// radio 切换时重置到第一页
-document.querySelectorAll("input[name='regFilter']").forEach(r => {
-  r.addEventListener("change", () => refreshRegistered(true));
-});
+// 筛选切换时重置到第一页
+$("#regFilter").addEventListener("change", () => refreshRegistered(true));
+
+// ── Plus 试用检查 ──
+
+function _collectPlusEmails(uncheckedOnly) {
+  const tds = Array.from(document.querySelectorAll("[data-plus-email]"));
+  if (!uncheckedOnly) return tds.map(td => td.dataset.plusEmail);
+  return tds
+    .filter(td => {
+      const span = td.querySelector(".plus-status");
+      return !span || span.classList.contains("plus-unknown");
+    })
+    .map(td => td.dataset.plusEmail);
+}
+
+async function _doCheckPlus(uncheckedOnly) {
+  const emails = _collectPlusEmails(uncheckedOnly);
+  if (!emails.length) {
+    $("#checkPlusResult").textContent = uncheckedOnly ? "当前页没有未检测的号" : "当前页无数据";
+    $("#checkPlusResult").className = "result";
+    return;
+  }
+  const proxy = $("#regProxy").value.trim();
+  $("#btnCheckPlus").disabled = true;
+  $("#btnRecheckPlus").disabled = true;
+  $("#checkPlusResult").textContent = `检查中... (${emails.length} 个号)`;
+  try {
+    const { results } = await api("/api/registered/check_plus", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ emails, proxy }),
+    });
+    let plusCount = 0, freeCount = 0, bannedCount = 0;
+    for (const [email, info] of Object.entries(results)) {
+      _plusCache[email] = info;
+      const td = document.querySelector(`[data-plus-email="${email}"]`);
+      if (td) td.innerHTML = `<span class="plus-status plus-${info.status}">${info.label}</span>`;
+      if (info.status === "plus_eligible" || info.status === "plus_active") plusCount++;
+      else if (info.status === "banned") bannedCount++;
+      else if (info.status === "free") freeCount++;
+    }
+    $("#checkPlusResult").textContent = `完成: ${plusCount} 可用Plus, ${freeCount} Free, ${bannedCount} 封号`;
+    $("#checkPlusResult").className = "result ok";
+  } catch (e) {
+    $("#checkPlusResult").textContent = "检查失败: " + e.message;
+    $("#checkPlusResult").className = "result bad";
+  } finally {
+    $("#btnCheckPlus").disabled = false;
+    $("#btnRecheckPlus").disabled = false;
+  }
+}
+
+$("#btnCheckPlus").addEventListener("click", () => _doCheckPlus(true));
+$("#btnRecheckPlus").addEventListener("click", () => _doCheckPlus(false));
+$("#btnCheckSelected").addEventListener("click", () => _doCheckPlusSelected());
+
+// ── 检测选中的号 ──
+async function _doCheckPlusSelected() {
+  const emails = _selectedRegEmails();
+  if (!emails.length) return;
+  const proxy = $("#regProxy").value.trim();
+  $("#btnCheckSelected").disabled = true;
+  $("#btnCheckPlus").disabled = true;
+  $("#btnRecheckPlus").disabled = true;
+  $("#checkPlusResult").textContent = `检查中... (${emails.length} 个号)`;
+  try {
+    const { results } = await api("/api/registered/check_plus", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ emails, proxy }),
+    });
+    let plusCount = 0, freeCount = 0, bannedCount = 0;
+    for (const [email, info] of Object.entries(results)) {
+      _plusCache[email] = info;
+      const td = document.querySelector(`[data-plus-email="${email}"]`);
+      if (td) td.innerHTML = `<span class="plus-status plus-${info.status}">${info.label}</span>`;
+      if (info.status === "plus_eligible" || info.status === "plus_active") plusCount++;
+      else if (info.status === "banned") bannedCount++;
+      else if (info.status === "free") freeCount++;
+    }
+    $("#checkPlusResult").textContent = `完成: ${plusCount} 可用Plus, ${freeCount} Free, ${bannedCount} 封号`;
+    $("#checkPlusResult").className = "result ok";
+  } catch (e) {
+    $("#checkPlusResult").textContent = "检查失败: " + e.message;
+    $("#checkPlusResult").className = "result bad";
+  } finally {
+    $("#btnCheckSelected").disabled = false;
+    $("#btnCheckPlus").disabled = false;
+    $("#btnRecheckPlus").disabled = false;
+  }
+}
 
 // ── 注册结果：复选框 + 批量删 + 单行删 ──
 
@@ -650,7 +765,9 @@ function _selectedRegEmails() {
 function _updateSelCountReg() {
   const n = _selectedRegEmails().length;
   $("#selCountReg").textContent = n;
+  $("#selCountCheck").textContent = n;
   $("#btnDeleteSelectedReg").disabled = n === 0;
+  $("#btnCheckSelected").disabled = n === 0;
 }
 $("#regTable").addEventListener("change", (e) => {
   if (e.target.classList.contains("reg-check")) _updateSelCountReg();
@@ -880,13 +997,14 @@ function _autoOptions() {
     proxy: $("#regProxy").value.trim(),
     proxy_pool: $("#autoProxyPool").value,
     concurrency: parseInt($("#autoConcurrency").value || "1", 10),
-    otp_timeout: parseInt($("#regOtpTimeout").value || "180", 10),
+    otp_timeout: parseInt($("#regOtpTimeout").value || "10", 10),
     want_access_token: true,
     want_session_token: true,
     want_refresh_token: true,
     cool_down_seconds: parseFloat($("#autoCoolDown").value || "3") || 0,
     auto_rotate_proxy: $("#autoRotateProxy").checked,
     rotate_proxy_every: parseInt($("#rotateProxyEvery").value || "5", 10) || 5,
+    target_count: parseInt($("#autoTargetCount").value || "0", 10) || 0,
   };
 }
 
@@ -951,9 +1069,17 @@ function _renderAutoStatus(s) {
   if (s.auto_rotate_proxy) {
     meta += ` 轮换=${s.rotate_proxy_every}`;
   }
+  if (s.target_count) {
+    meta += ` 目标=${s.target_count}`;
+  }
+  // 有目标时显示 "成功 37 / 100（剩 63）"，否则显示纯成功数
+  const okDisplay = s.target_count
+    ? `<b class="ok">${s.registered_ok}</b> / ${s.target_count}`
+      + (s.remaining != null ? ` <span class="auto-meta">(剩 ${s.remaining})</span>` : "")
+    : `<b class="ok">${s.registered_ok}</b> 成功`;
   $("#autoStatus").innerHTML = `
     <b>${stateLabel}</b>
-    &nbsp;|&nbsp; 已完成: <b class="ok">${s.registered_ok}</b> 成功 / <b class="bad">${s.registered_fail}</b> 失败
+    &nbsp;|&nbsp; 已完成: ${okDisplay} / <b class="bad">${s.registered_fail}</b> 失败
     &nbsp;|&nbsp; 运行: ${elapsed}
     &nbsp;|&nbsp; <span class="auto-meta">${meta}</span>
     ${workerRows ? "<br>" + workerRows : ""}
@@ -1032,6 +1158,7 @@ const PERSIST_FIELDS = {
   autoRotateProxy:   "check",
   rotateProxyEvery:  "text",
   proxyMaxUses:      "text",
+  autoTargetCount:   "text",
 };
 
 function _saveForm() {

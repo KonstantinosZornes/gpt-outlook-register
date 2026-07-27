@@ -198,10 +198,32 @@ def get_sentinel_token_via_quickjs(
     flow: str = "authorize_continue",
     timeout_ms: int = 45000,
     log: Optional[Callable[[str], None]] = None,
+    user_agent: str = "",
+    screen: str = "",
+    lang: str = "",
+    lang_full: str = "",
+    browser_type: str = "",
+    platform: str = "",
+    vendor: Optional[str] = None,
+    hardware_concurrency: int = 0,
+    device_memory: Optional[int] = None,
+    max_touch_points: int = 0,
+    device_pixel_ratio: float = 0.0,
+    timezone: str = "",  # IANA 时区名（如 Asia/Tokyo）
+    # Client Hints 全套（QuickJS 路径不直接用，但为了签名统一接收）
+    sec_ch_ua_full_version_list: str = "",
+    sec_ch_ua_arch: str = "",
+    sec_ch_ua_bitness: str = "",
+    sec_ch_ua_model: str = "",
+    sec_ch_ua_platform_version: str = "",
 ) -> Optional[str]:
     """Try the QuickJS path. Return JSON string on success, None on any failure.
 
     Caller is expected to fall back to pure-Python sentinel on None.
+
+    指纹一致性：``platform`` / ``vendor`` / ``hardware_concurrency`` 等按调用方
+    传入的浏览器家族画像喂给 sdk.js 的 navigator，避免 UA 说 Windows Chrome 但
+    navigator 报 MacIntel/Apple 的硬伤。未传时按 UA 推断合理默认值。
     """
     log = log or (lambda m: logger.info(m))
     quickjs_script = _quickjs_script_path()
@@ -210,6 +232,59 @@ def get_sentinel_token_via_quickjs(
         return None
 
     did = str(device_id or uuid.uuid4())
+
+    screen_w, screen_h = "1920", "1080"
+    if screen and "x" in screen:
+        parts = screen.split("x", 1)
+        screen_w, screen_h = parts[0], parts[1]
+
+    lang_primary = lang or "en-US"
+    languages = [lang_primary]
+    if lang_full:
+        for part in lang_full.split(","):
+            tag = part.split(";")[0].strip()
+            if tag and tag not in languages:
+                languages.append(tag)
+
+    # ── 指纹一致性：platform / vendor 未显式传入时按 UA 推断，绝不写死 MacIntel ──
+    ua_l = (user_agent or "").lower()
+    if not platform:
+        if "iphone" in ua_l:
+            platform = "iPhone"
+        elif "windows" in ua_l:
+            platform = "Win32"
+        elif "mac" in ua_l:
+            platform = "MacIntel"
+        else:
+            platform = "Win32"
+    if vendor is None:
+        if "firefox" in ua_l:
+            vendor = ""                       # Firefox navigator.vendor 为空串
+        elif "chrome" in ua_l:
+            vendor = "Google Inc."
+        else:
+            vendor = "Apple Computer, Inc."   # Safari / iOS
+    hw_conc = int(hardware_concurrency) if hardware_concurrency else 8
+
+    env_payload = {
+        "device_id": did,
+        "user_agent": user_agent or "Mozilla/5.0",
+        "screen_width": screen_w,
+        "screen_height": screen_h,
+        "language": lang_primary,
+        "languages": languages,
+        "platform": platform,
+        "vendor": vendor,
+        "hardware_concurrency": hw_conc,
+        "browser_type": browser_type or "",
+        "device_pixel_ratio": float(device_pixel_ratio) if device_pixel_ratio else 1.0,
+        "max_touch_points": int(max_touch_points),
+        "timezone": timezone or "UTC",  # IANA 时区名
+    }
+    # deviceMemory 仅 Chromium 暴露；None 时不下发该键，JS 侧保持 undefined
+    if device_memory is not None:
+        env_payload["device_memory"] = int(device_memory)
+
     try:
         sdk_file = _ensure_sdk_file(session, timeout_ms)
 
@@ -217,7 +292,7 @@ def get_sentinel_token_via_quickjs(
             action="requirements",
             sdk_file=sdk_file,
             quickjs_script=quickjs_script,
-            payload={"device_id": did},
+            payload=env_payload,
             timeout_ms=timeout_ms,
         )
         request_p = str(requirements.get("request_p") or "").strip()
@@ -233,15 +308,16 @@ def get_sentinel_token_via_quickjs(
             log("Sentinel QuickJS 失败: challenge token 为空")
             return None
 
+        solve_payload = dict(env_payload)
+        solve_payload.update({
+            "request_p": request_p,
+            "challenge": challenge,
+        })
         solved = _run_quickjs_action(
             action="solve",
             sdk_file=sdk_file,
             quickjs_script=quickjs_script,
-            payload={
-                "device_id": did,
-                "request_p": request_p,
-                "challenge": challenge,
-            },
+            payload=solve_payload,
             timeout_ms=timeout_ms,
         )
         final_p = str(solved.get("final_p") or solved.get("p") or "").strip()
@@ -260,7 +336,7 @@ def get_sentinel_token_via_quickjs(
             separators=(",", ":"),
             ensure_ascii=False,
         )
-        log(f"Sentinel QuickJS 成功 (p_len={len(final_p)} t_len={len(t_value)} c_len={len(c_value)})")
+        log(f"Sentinel QuickJS OK (len={len(token)})")
         return token
     except Exception as e:
         log(f"Sentinel QuickJS 异常: {e}")

@@ -63,6 +63,13 @@ class SentinelTokenGenerator:
         screen: str = "",
         lang: str = "",
         lang_full: str = "",
+        browser_type: str = "",
+        navigator_platform: str = "",
+        navigator_vendor: str | None = None,
+        hardware_concurrency: int = 0,
+        device_memory: int | None = None,
+        max_touch_points: int = 0,
+        device_pixel_ratio: float = 0.0,
     ):
         self.device_id = device_id or str(uuid.uuid4())
         self.user_agent = user_agent or DEFAULT_UA
@@ -71,6 +78,32 @@ class SentinelTokenGenerator:
         self.lang_full = lang_full or "en-US,en"
         self.requirements_seed = str(random.random())
         self.sid = str(uuid.uuid4())
+
+        # ── 指纹一致性：platform/vendor 未传时按 UA 推断，不再写死 ──
+        ua_l = (self.user_agent or "").lower()
+        if not navigator_platform:
+            if "iphone" in ua_l:
+                navigator_platform = "iPhone"
+            elif "windows" in ua_l:
+                navigator_platform = "Win32"
+            elif "mac" in ua_l:
+                navigator_platform = "MacIntel"
+            else:
+                navigator_platform = "Win32"
+        if navigator_vendor is None:
+            if "firefox" in ua_l:
+                navigator_vendor = ""
+            elif "chrome" in ua_l:
+                navigator_vendor = "Google Inc."
+            else:
+                navigator_vendor = "Apple Computer, Inc."
+        self.browser_type = browser_type or ""
+        self.navigator_platform = navigator_platform
+        self.navigator_vendor = navigator_vendor
+        self.hardware_concurrency = int(hardware_concurrency) if hardware_concurrency else 8
+        self.device_memory = device_memory
+        self.max_touch_points = int(max_touch_points)
+        self.device_pixel_ratio = float(device_pixel_ratio) if device_pixel_ratio else 1.0
 
     @staticmethod
     def _fnv1a_32(text: str) -> str:
@@ -90,14 +123,21 @@ class SentinelTokenGenerator:
         date_str = now.strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
         perf_now = random.uniform(1000, 50000)
         time_origin = time.time() * 1000 - perf_now
-        nav_prop = random.choice([
-            "vendorSub", "productSub", "vendor", "maxTouchPoints",
-            "scheduling", "userActivation", "doNotTrack", "geolocation",
-            "connection", "plugins", "mimeTypes", "pdfViewerEnabled",
-            "webkitTemporaryStorage", "webkitPersistentStorage",
-            "hardwareConcurrency", "cookieEnabled", "credentials",
-            "mediaDevices", "permissions", "locks", "ink",
-        ])
+        # 指纹一致性：navigator 属性名随机，但值取真实画像（不再固定 "undefined"）。
+        nav_props = [
+            ("vendor", self.navigator_vendor or "undefined"),
+            ("vendorSub", ""),
+            ("productSub", "20030107" if "firefox" in self.user_agent.lower() else "20030107"),
+            ("platform", self.navigator_platform),
+            ("maxTouchPoints", str(self.max_touch_points)),
+            ("hardwareConcurrency", str(self.hardware_concurrency)),
+            ("cookieEnabled", "true"),
+            ("doNotTrack", random.choice(["null", "1", "unspecified"])),
+            ("pdfViewerEnabled", "true" if self.navigator_vendor == "Google Inc." else "false"),
+        ]
+        if self.device_memory is not None:
+            nav_props.append(("deviceMemory", str(self.device_memory)))
+        nav_prop, nav_value = random.choice(nav_props)
         return [
             self.screen,
             date_str,
@@ -110,13 +150,13 @@ class SentinelTokenGenerator:
             self.lang,
             self.lang_full,
             random.random(),
-            f"{nav_prop}−undefined",
+            f"{nav_prop}−{nav_value}" if nav_value != "" else f"{nav_prop}−undefined",
             random.choice(["location", "implementation", "URL", "documentURI", "compatMode"]),
             random.choice(["Object", "Function", "Array", "Number", "parseFloat", "undefined"]),
             perf_now,
             self.sid,
             "",
-            random.choice([4, 8, 12, 16]),
+            self.device_pixel_ratio,
             time_origin,
         ]
 
@@ -158,16 +198,37 @@ def fetch_sentinel_challenge(
     flow: str = "authorize_continue",
     user_agent: str | None = None,
     sec_ch_ua: str | None = None,
+    sec_ch_ua_platform: str = "",
+    sec_ch_ua_mobile: str = "",
+    sec_ch_ua_full_version_list: str = "",
+    sec_ch_ua_arch: str = "",
+    sec_ch_ua_bitness: str = "",
+    sec_ch_ua_model: str = "",
+    sec_ch_ua_platform_version: str = "",
     impersonate: str | None = None,
     request_p: str | None = None,
     screen: str = "",
     lang: str = "",
     lang_full: str = "",
+    browser_type: str = "",
+    navigator_platform: str = "",
+    navigator_vendor: str | None = None,
+    hardware_concurrency: int = 0,
+    device_memory: int | None = None,
+    max_touch_points: int = 0,
+    device_pixel_ratio: float = 0.0,
 ) -> dict | None:
     """POST `/sentinel/req` 并返回响应 JSON。失败返回 None。"""
     generator = SentinelTokenGenerator(
         device_id=device_id, user_agent=user_agent,
         screen=screen, lang=lang, lang_full=lang_full,
+        browser_type=browser_type,
+        navigator_platform=navigator_platform,
+        navigator_vendor=navigator_vendor,
+        hardware_concurrency=hardware_concurrency,
+        device_memory=device_memory,
+        max_touch_points=max_touch_points,
+        device_pixel_ratio=device_pixel_ratio,
     )
     req_body = {
         "p": str(request_p or "").strip() or generator.generate_requirements_token(),
@@ -187,8 +248,19 @@ def fetch_sentinel_challenge(
     }
     if sec_ch_ua:
         headers["sec-ch-ua"] = sec_ch_ua
-        headers["sec-ch-ua-mobile"] = "?0"
-        headers["sec-ch-ua-platform"] = '"Windows"'
+        headers["sec-ch-ua-mobile"] = sec_ch_ua_mobile or "?0"
+        headers["sec-ch-ua-platform"] = sec_ch_ua_platform or '"Windows"'
+        # Client Hints 全套（仅 Chromium 有值时才下发）
+        if sec_ch_ua_full_version_list:
+            headers["sec-ch-ua-full-version-list"] = sec_ch_ua_full_version_list
+        if sec_ch_ua_arch:
+            headers["sec-ch-ua-arch"] = sec_ch_ua_arch
+        if sec_ch_ua_bitness:
+            headers["sec-ch-ua-bitness"] = sec_ch_ua_bitness
+        if sec_ch_ua_model is not None:  # 空串 "" 也要下发（桌面 Chrome 的真实值）
+            headers["sec-ch-ua-model"] = sec_ch_ua_model
+        if sec_ch_ua_platform_version:
+            headers["sec-ch-ua-platform-version"] = sec_ch_ua_platform_version
     kwargs = {"data": json.dumps(req_body), "headers": headers, "timeout": 20}
     if impersonate:
         kwargs["impersonate"] = impersonate
@@ -209,10 +281,24 @@ def build_sentinel_token(
     flow: str = "authorize_continue",
     user_agent: str | None = None,
     sec_ch_ua: str | None = None,
+    sec_ch_ua_platform: str = "",
+    sec_ch_ua_mobile: str = "",
+    sec_ch_ua_full_version_list: str = "",
+    sec_ch_ua_arch: str = "",
+    sec_ch_ua_bitness: str = "",
+    sec_ch_ua_model: str = "",
+    sec_ch_ua_platform_version: str = "",
     impersonate: str | None = None,
     screen: str = "",
     lang: str = "",
     lang_full: str = "",
+    browser_type: str = "",
+    navigator_platform: str = "",
+    navigator_vendor: str | None = None,
+    hardware_concurrency: int = 0,
+    device_memory: int | None = None,
+    max_touch_points: int = 0,
+    device_pixel_ratio: float = 0.0,
 ) -> str | None:
     """完整 Sentinel token：fetch challenge → 用 server-given seed/difficulty 解 PoW → 拼装。
 
@@ -224,10 +310,24 @@ def build_sentinel_token(
         flow=flow,
         user_agent=user_agent,
         sec_ch_ua=sec_ch_ua,
+        sec_ch_ua_platform=sec_ch_ua_platform,
+        sec_ch_ua_mobile=sec_ch_ua_mobile,
+        sec_ch_ua_full_version_list=sec_ch_ua_full_version_list,
+        sec_ch_ua_arch=sec_ch_ua_arch,
+        sec_ch_ua_bitness=sec_ch_ua_bitness,
+        sec_ch_ua_model=sec_ch_ua_model,
+        sec_ch_ua_platform_version=sec_ch_ua_platform_version,
         impersonate=impersonate,
         screen=screen,
         lang=lang,
         lang_full=lang_full,
+        browser_type=browser_type,
+        navigator_platform=navigator_platform,
+        navigator_vendor=navigator_vendor,
+        hardware_concurrency=hardware_concurrency,
+        device_memory=device_memory,
+        max_touch_points=max_touch_points,
+        device_pixel_ratio=device_pixel_ratio,
     )
     if not challenge:
         return None
@@ -240,6 +340,13 @@ def build_sentinel_token(
     generator = SentinelTokenGenerator(
         device_id=device_id, user_agent=user_agent,
         screen=screen, lang=lang, lang_full=lang_full,
+        browser_type=browser_type,
+        navigator_platform=navigator_platform,
+        navigator_vendor=navigator_vendor,
+        hardware_concurrency=hardware_concurrency,
+        device_memory=device_memory,
+        max_touch_points=max_touch_points,
+        device_pixel_ratio=device_pixel_ratio,
     )
     pow_data = challenge.get("proofofwork") or {}
     if pow_data.get("required") and pow_data.get("seed"):
@@ -266,9 +373,24 @@ def get_sentinel_token(
     flow: str = "authorize_continue",
     user_agent: str = DEFAULT_UA,
     sec_ch_ua: str = "",
+    sec_ch_ua_platform: str = "",
+    sec_ch_ua_mobile: str = "",
+    sec_ch_ua_full_version_list: str = "",
+    sec_ch_ua_arch: str = "",
+    sec_ch_ua_bitness: str = "",
+    sec_ch_ua_model: str = "",
+    sec_ch_ua_platform_version: str = "",
     screen: str = "",
     lang: str = "",
     lang_full: str = "",
+    browser_type: str = "",
+    navigator_platform: str = "",
+    navigator_vendor: str | None = None,
+    hardware_concurrency: int = 0,
+    device_memory: int | None = None,
+    max_touch_points: int = 0,
+    device_pixel_ratio: float = 0.0,
+    timezone: str = "",  # IP 联动时区
 ) -> str:
     """auth_flow.py 复用的入口；返回 JSON 字符串，永远不抛异常。
 
@@ -281,6 +403,9 @@ def get_sentinel_token(
          或 sdk.js 下载失败时的兜底。
       3. 无 challenge 模式 — 最后兜底，保证返回可解析字符串避免阻塞。
 
+    指纹一致性：``browser_type`` 及硬件画像沿两条路径穿透到 sdk.js 的 navigator
+    与纯 Python config，保证 UA↔platform↔vendor↔硬件全程一致。
+
     禁用 QuickJS：`export OPENAI_SENTINEL_DISABLE_QUICKJS=1`。
     """
     if not os.environ.get("OPENAI_SENTINEL_DISABLE_QUICKJS"):
@@ -291,9 +416,25 @@ def get_sentinel_token(
                 device_id=device_id,
                 flow=flow,
                 log=lambda m: logger.info(m),
+                user_agent=user_agent,
+                screen=screen,
+                lang=lang,
+                lang_full=lang_full,
+                browser_type=browser_type,
+                platform=navigator_platform,
+                vendor=navigator_vendor,
+                hardware_concurrency=hardware_concurrency,
+                device_memory=device_memory,
+                max_touch_points=max_touch_points,
+                device_pixel_ratio=device_pixel_ratio,
+                timezone=timezone,  # IP 联动时区
+                sec_ch_ua_full_version_list=sec_ch_ua_full_version_list,
+                sec_ch_ua_arch=sec_ch_ua_arch,
+                sec_ch_ua_bitness=sec_ch_ua_bitness,
+                sec_ch_ua_model=sec_ch_ua_model,
+                sec_ch_ua_platform_version=sec_ch_ua_platform_version,
             )
             if qtoken:
-                logger.info(f"Sentinel Token 组装完成 (QuickJS 长度: {len(qtoken)})")
                 return qtoken
             logger.warning("Sentinel QuickJS 失败，回退到纯 Python")
         except Exception as e:
@@ -305,18 +446,39 @@ def get_sentinel_token(
         flow=flow,
         user_agent=user_agent,
         sec_ch_ua=sec_ch_ua,
+        sec_ch_ua_platform=sec_ch_ua_platform,
+        sec_ch_ua_mobile=sec_ch_ua_mobile,
+        sec_ch_ua_full_version_list=sec_ch_ua_full_version_list,
+        sec_ch_ua_arch=sec_ch_ua_arch,
+        sec_ch_ua_bitness=sec_ch_ua_bitness,
+        sec_ch_ua_model=sec_ch_ua_model,
+        sec_ch_ua_platform_version=sec_ch_ua_platform_version,
         screen=screen,
         lang=lang,
         lang_full=lang_full,
+        browser_type=browser_type,
+        navigator_platform=navigator_platform,
+        navigator_vendor=navigator_vendor,
+        hardware_concurrency=hardware_concurrency,
+        device_memory=device_memory,
+        max_touch_points=max_touch_points,
+        device_pixel_ratio=device_pixel_ratio,
     )
     if token:
-        logger.info(f"Sentinel Token 组装完成 (纯 Python 长度: {len(token)})")
+        logger.debug(f"Sentinel Token (纯Python len={len(token)})")
         return token
 
     logger.warning("Sentinel /req 也失败，回退到无 challenge 模式")
     fallback_p = SentinelTokenGenerator(
         device_id=device_id, user_agent=user_agent,
         screen=screen, lang=lang, lang_full=lang_full,
+        browser_type=browser_type,
+        navigator_platform=navigator_platform,
+        navigator_vendor=navigator_vendor,
+        hardware_concurrency=hardware_concurrency,
+        device_memory=device_memory,
+        max_touch_points=max_touch_points,
+        device_pixel_ratio=device_pixel_ratio,
     ).generate_requirements_token()
     return json.dumps({
         "p": fallback_p,
