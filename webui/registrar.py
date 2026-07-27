@@ -155,7 +155,7 @@ def _do_register(
         # auth_flow 会误判为"已有账号"分支 → 不设 WEBUI_ALLOW_LOGIN 会 fast-fail。
         # 单号 WebUI 场景下 fast-fail 没意义（批量跑才需要"跳过被识别的号"），故强制 ON。
         env_overrides["WEBUI_ALLOW_LOGIN"] = "1"
-        env_overrides["OTP_TIMEOUT"] = str(int(options.get("otp_timeout") or 180))
+        env_overrides["OTP_TIMEOUT"] = str(int(options.get("otp_timeout") or 120))
         # 认证模式互斥：oauth 只换 RT；agent_identity 只注册 agent，绝不交叉。
         agent_identity_only = bool(options.get("agent_identity_only"))
         if agent_identity_only:

@@ -139,7 +139,7 @@ $("#btnRun").addEventListener("click", async () => {
   const opts = {
     email: email || null,
     proxy: $("#regProxy").value.trim(),
-    otp_timeout: parseInt($("#regOtpTimeout").value || "10", 10),
+    otp_timeout: parseInt($("#regOtpTimeout").value || "120", 10),
     want_access_token: true,
     want_session_token: true,
     want_refresh_token: true,
@@ -997,7 +997,7 @@ function _autoOptions() {
     proxy: $("#regProxy").value.trim(),
     proxy_pool: $("#autoProxyPool").value,
     concurrency: parseInt($("#autoConcurrency").value || "1", 10),
-    otp_timeout: parseInt($("#regOtpTimeout").value || "10", 10),
+    otp_timeout: parseInt($("#regOtpTimeout").value || "120", 10),
     want_access_token: true,
     want_session_token: true,
     want_refresh_token: true,

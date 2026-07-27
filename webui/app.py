@@ -119,7 +119,7 @@ class RegisterReq(BaseModel):
         False,
         description="True=若填写了代理池，单个注册从代理池随机选一条代理",
     )
-    otp_timeout: int = 180
+    otp_timeout: int = 120
     allow_existing_login: bool = True
     strict_email: bool = Field(
         True,
@@ -1047,7 +1047,7 @@ class AutoLoopStartReq(BaseModel):
     proxy: str = ""              # 单代理（concurrency=1 + 无代理池时用）
     proxy_pool: str = ""         # 多代理池（每行一个）；优先于 proxy
     concurrency: int = 1         # 并发 worker 数（1-20）
-    otp_timeout: int = 10
+    otp_timeout: int = 120
     allow_existing_login: bool = True
     cool_down_seconds: float = 3.0  # 每个 worker 跑完后冷却（防风控）
     auto_rotate_proxy: bool = True   # 是否按账号批量轮换代理
