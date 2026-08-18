@@ -38,7 +38,7 @@ update_and_restart() {
 
     if [ "$dir" = "gpt-outlook-register" ]; then
       echo "Building frontend: $dir"
-      if ! (cd "$path/webui/frontend" && npm ci && npm run build); then
+      if ! (cd "$path/webui/frontend" && npm ci --include=dev && npx vite build); then
         echo "Frontend build failed: $dir"
         return 1
       fi

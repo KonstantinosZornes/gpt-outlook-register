@@ -381,6 +381,7 @@ class AutoLoopController:
 
             # 等当前 run 跑完
             ok, category = self._wait_run_finish(run_id)
+            real_email = self._run_email(run_id) or account["email"]
 
             with self._lock:
                 self._worker_status.pop(worker_id, None)
@@ -388,7 +389,7 @@ class AutoLoopController:
             self._broadcast("state", self._snapshot())
             self._broadcast("run_finished", {
                 "worker_id": worker_id,
-                "email": account["email"],
+                "email": real_email,
                 "run_id": run_id,
                 "ok": ok,
                 "category": category,
@@ -402,18 +403,35 @@ class AutoLoopController:
                         break
                     time.sleep(0.1)
 
+    def _run_email(self, run_id: str) -> str:
+        con = db._conn()
+        cur = con.execute("SELECT email FROM runs WHERE run_id=?", (run_id,))
+        row = cur.fetchone()
+        return (row["email"] or "") if row else ""
+
     def _wait_run_finish(self, run_id: str, timeout: int = 1800) -> tuple[bool, str]:
-        """轮询 runs 表，等 run 跑完。"""
+        """轮询 runs 表，等 run 跑完。claim 后把 worker 状态换成真实邮箱。"""
         deadline = time.time() + timeout
+        last_email = ""
         while time.time() < deadline:
             if self._stop_event.is_set():
                 return False, ""
             con = db._conn()
             cur = con.execute(
-                "SELECT status, error_category FROM runs WHERE run_id=?", (run_id,)
+                "SELECT status, error_category, email FROM runs WHERE run_id=?",
+                (run_id,),
             )
             row = cur.fetchone()
             if row:
+                em = row["email"] or ""
+                if em and em != last_email and "placeholder.local" not in em:
+                    last_email = em
+                    with self._lock:
+                        for info in self._worker_status.values():
+                            if info.get("run_id") == run_id:
+                                info["email"] = em
+                                break
+                    self._broadcast("state", self._snapshot())
                 st = row["status"]
                 if st == "done":
                     return True, ""

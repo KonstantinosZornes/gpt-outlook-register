@@ -41,7 +41,11 @@ async function run() {
       want_refresh_token: true,
       want_2fa: form.value.want2fa,
     })
-    runtime.addLog(`[client] 启动注册 run_id=${r.run_id} email=${r.email}`, 'evt')
+    const px = proxyText(form.value)
+    runtime.addLog(
+      `[client] 启动注册 run_id=${r.run_id} email=${r.email} proxy=${px || '直连'}`,
+      'evt',
+    )
     runtime.streamRun(r.run_id)
   } catch (e) {
     ElMessage.error(e.message)

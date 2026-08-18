@@ -317,7 +317,11 @@ def api_register(req: RegisterReq):
         "strict_email": req.strict_email,
     }
     run_id = registrar.start_registration(account, options)
-    logger.info(f"[run] {run_id} -> {account['email']} (mail_source={mail_source})")
+    from proxy_utils import mask_proxy_url
+    logger.info(
+        f"[run] {run_id} -> {account['email']} "
+        f"(mail_source={mail_source} proxy={mask_proxy_url(req.proxy) or '直连'})"
+    )
     return {"ok": True, "run_id": run_id, "email": account["email"]}
 
 

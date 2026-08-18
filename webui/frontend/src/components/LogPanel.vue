@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onUnmounted, ref, watch } from 'vue'
+import { nextTick, onDeactivated, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
 import { copyText } from '@/api/request'
@@ -37,6 +37,9 @@ function onKey(e) {
 window.addEventListener('keydown', onKey)
 onDeactivated(() => {
   fullscreen.value = false
+  document.body.style.overflow = ''
+})
+onUnmounted(() => {
   window.removeEventListener('keydown', onKey)
   document.body.style.overflow = ''
 })

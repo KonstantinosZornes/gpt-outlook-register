@@ -181,6 +181,7 @@ def _do_register(
         root_logger.setLevel(logging.INFO)
 
     email = account["email"]
+    current_email = email
     # 提前读取，避免在 try 块前异常时 except 引用未定义
     mail_source = db.get_setting("mail_source", "outlook")
     # 要不要操作号池（mark_done / mark_failed / release）由 provider 声明的
@@ -218,10 +219,9 @@ def _do_register(
             ensure_sticky_proxy(raw_proxy, session_id=run_id.replace("-", "")[:12])
             if raw_proxy else None
         )
-        if cfg.proxy:
-            logging.getLogger("registrar").info(
-                f"[register] 代理 {mask_proxy_url(cfg.proxy)}"
-            )
+        logging.getLogger("registrar").info(
+            f"[register] 代理 {mask_proxy_url(cfg.proxy) if cfg.proxy else '直连'}"
+        )
 
         # ─ 邮箱来源路由 ─
         # 原来是 if cf_temp / else outlook 的写死分支，加一种邮箱就得回来改。
@@ -251,16 +251,22 @@ def _do_register(
             _orig_create_mailbox = mail.create_mailbox
 
             def _wrapped_create_mailbox():
+                nonlocal current_email
                 em = _orig_create_mailbox()
-                real_email = em or getattr(mail, "email", "") or email
+                real_email = em or getattr(mail, "email", "") or current_email
                 if (
                     real_email and "@" in real_email
                     and "placeholder.local" not in real_email
+                    and real_email != current_email
                 ):
+                    current_email = real_email
                     try:
                         db.update_run_email(run_id, real_email)
                     except Exception:
                         pass
+                    logging.getLogger("registrar").info(
+                        f"[register] 邮箱已确定: {real_email}"
+                    )
                     _emit_status(
                         run_id, "phase",
                         {"phase": "email_claimed", "email": real_email},
@@ -298,7 +304,7 @@ def _do_register(
                 #      走到这个钩子时它必然已是真实邮箱；取不到再退回外层 email 兜底。
                 #   这里绝不能拖垮注册，包一层 try：落盘失败也还有 _tfa_box 兜着。
                 try:
-                    real_email = getattr(getattr(_flow, "result", None), "email", "") or email
+                    real_email = getattr(getattr(_flow, "result", None), "email", "") or current_email
                     db.save_totp_early(real_email, info["secret"], info.get("factor_id", ""))
                     logging.getLogger("registrar").info(
                         f"[register] 2FA secret 已早落盘 email={real_email}"
@@ -333,8 +339,8 @@ def _do_register(
             on_session_ready=_bind_2fa_hook if options.get("want_2fa") else None,
             account_callback=_account_callback_for_flow,
         )
-        _emit_status(run_id, "phase", {"phase": "starting", "email": email})
-        logging.getLogger("registrar").info(f"[register] 开始: {email}")
+        _emit_status(run_id, "phase", {"phase": "starting", "email": current_email})
+        logging.getLogger("registrar").info(f"[register] 开始: {current_email}")
 
         partial = False
         d: dict
@@ -506,7 +512,7 @@ def _do_register(
             _pw = (flow.result.password or "").strip()
             if _pw:
                 logging.getLogger("registrar").error(
-                    f"[register] 该号已生成密码，请自行留存: {flow.result.email or email} / {_pw}"
+                    f"[register] 该号已生成密码，请自行留存: {flow.result.email or current_email} / {_pw}"
                 )
         except Exception:
             pass  # flow 还没建出来（异常发生在 AuthFlow 之前），没密码可救
@@ -527,7 +533,10 @@ def _do_register(
             else:
                 mail.on_release(f"[{category}] {err}"[:200])
         db.finish_run(run_id, "failed", err, category=category)
-        _emit_status(run_id, "error", {"message": err, "category": category})
+        _emit_status(
+            run_id, "error",
+            {"message": err, "category": category, "email": current_email},
+        )
 
     finally:
         # env 覆盖现在只挂在 AuthFlow 实例上，随实例一起回收，无需还原。

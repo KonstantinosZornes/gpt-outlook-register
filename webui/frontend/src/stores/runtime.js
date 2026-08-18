@@ -65,7 +65,11 @@ export const useRuntimeStore = defineStore('runtime', () => {
             lastRunResult.value = { email: d.email, error: d.message }
             addLog('错误: ' + d.message, 'err')
           } else if (d.kind === 'phase') {
-            addLog(`phase=${d.phase} email=${d.email}`, 'evt')
+            if (d.phase === 'email_claimed' && d.email) {
+              addLog(`[client] 邮箱已确定 ${d.email}`, 'ok')
+            } else {
+              addLog(`phase=${d.phase} email=${d.email || ''}`, 'evt')
+            }
           }
         } catch (_) {}
       },
@@ -94,7 +98,7 @@ export const useRuntimeStore = defineStore('runtime', () => {
       run_started: (e) => {
         try {
           const d = JSON.parse(e.data)
-          addLog(`[auto] 开始注册 ${d.email} (run=${d.run_id})`, 'evt')
+          addLog(`[auto] 开始注册 ${d.email} (run=${d.run_id} proxy=${d.proxy || '直连'})`, 'evt')
           streamRun(d.run_id) // 复用单跑 SSE，接管日志
         } catch (_) {}
       },
