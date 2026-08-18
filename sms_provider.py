@@ -252,6 +252,10 @@ class SmsBowerProvider(BaseSmsProvider):
         self.last_code_result: Optional[dict] = None
         self.current_activation: Optional[SmsActivation] = None
 
+    @property
+    def name(self) -> str:
+        return "HeroSMS" if "hero-sms.com" in self.base_url else "SmsBower"
+
     # ---- HTTP ----
 
     def _request(self, params: dict, *, needs_key: bool = True, timeout: int = 30) -> requests.Response:
@@ -381,7 +385,7 @@ class SmsBowerProvider(BaseSmsProvider):
         try:
             rows = self.get_top_countries(service=service)
         except Exception as exc:
-            logger.warning("SmsBower get_best_country 查询失败: %s", exc)
+            logger.warning("%s get_best_country 查询失败: %s", self.name, exc)
             return None
         if not rows:
             return None
@@ -408,9 +412,9 @@ class SmsBowerProvider(BaseSmsProvider):
                 # 非白名单国家 → warn 一下（不阻止）
                 if not strict_whitelist and cid not in OPENAI_SMS_COUNTRIES:
                     logger.warning(
-                        "SmsBower 自动选了非 OpenAI-SMS 白名单国家 country=%s price=%s "
+                        "%s 自动选了非 OpenAI-SMS 白名单国家 country=%s price=%s "
                         "（OpenAI 可能让此号用 WhatsApp 验证 → 收不到 SMS）",
-                        cid, price,
+                        self.name, cid, price,
                     )
                 return cid
             return None
@@ -489,13 +493,13 @@ class SmsBowerProvider(BaseSmsProvider):
                 common["maxPrice"] = self.fixed_price
         elif self.max_price > 0:
             common["maxPrice"] = self.max_price
-        logger.info("SmsBower %s: service=%s country=%s maxPrice=%s",
-                    action, service, country, common.get("maxPrice", "未设置"))
+        logger.info("%s %s: service=%s country=%s maxPrice=%s",
+                    self.name, action, service, country, common.get("maxPrice", "未设置"))
 
         try:
             resp = self._request(common)
             resp_text = resp.text.strip()
-            logger.info("SmsBower %s resp: status=%s text=%s", action, resp.status_code, resp_text[:500])
+            logger.info("%s %s resp: status=%s text=%s", self.name, action, resp.status_code, resp_text[:500])
 
             # V2 返回 JSON
             if action == "getNumberV2":
@@ -597,7 +601,7 @@ class SmsBowerProvider(BaseSmsProvider):
                             )
                             self.current_activation = activation
                             if len(country_candidates) > 1:
-                                logger.info("SmsBower 在国家 %s 租到号 %s (action=%s)", cid, phone, action)
+                                logger.info("%s 在国家 %s 租到号 %s (action=%s)", self.name, cid, phone, action)
                             return activation
                         except Exception as e:
                             msg = str(e)[:120]
@@ -674,7 +678,7 @@ class SmsBowerProvider(BaseSmsProvider):
                             return {"status": "ok", "code": code,
                                     "sms_key": result.get("sms_key") or ""}
                 except Exception as e:
-                    logger.debug("SmsBower status %s 失败: %s", src, e)
+                    logger.debug("%s status %s 失败: %s", self.name, src, e)
 
             elapsed = time.time() - start
             # OpenAI 端 resend：固定间隔触发，最多 N 次
@@ -684,8 +688,8 @@ class SmsBowerProvider(BaseSmsProvider):
                     self._resend_callback()
                     openai_resend_count = expected_resend_count
                     logger.info(
-                        "SmsBower: 已请求 OpenAI 端 resend (第 %d/%d 次, elapsed=%ds)",
-                        openai_resend_count, openai_resend_max, int(elapsed),
+                        "%s: 已请求 OpenAI 端 resend (第 %d/%d 次, elapsed=%ds)",
+                        self.name, openai_resend_count, openai_resend_max, int(elapsed),
                     )
                 except Exception as e:
                     logger.warning("OpenAI resend callback 失败: %s", e)
@@ -798,8 +802,8 @@ class SmsBowerProvider(BaseSmsProvider):
             pass
         # 简化原因显示：只保留前 80 字符
         short_reason = (reason or "未知原因")[:80]
-        logger.info("SmsBower 号 activation_id=%s cancel 退款 %s (原因: %s)",
-                    activation_id, "✅" if cancel_ok else "❌", short_reason)
+        logger.info("%s 号 activation_id=%s cancel 退款 %s (原因: %s)",
+                    self.name, activation_id, "✅" if cancel_ok else "❌", short_reason)
         # 同时清掉复用缓存（避免下次注册又拿到这个被拒的号）
         with _SMS_CACHE_LOCK:
             cache = _SMS_CACHE
