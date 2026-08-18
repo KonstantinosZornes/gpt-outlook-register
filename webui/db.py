@@ -96,6 +96,26 @@ def init_db():
             error           TEXT,
             error_category  TEXT         -- network / account / unknown
         );
+
+        CREATE TABLE IF NOT EXISTS sms_success_records (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id          TEXT,
+            email           TEXT,
+            provider        TEXT NOT NULL,
+            manufacturer    TEXT NOT NULL DEFAULT '',
+            country         TEXT NOT NULL DEFAULT '',
+            phone_prefix    TEXT NOT NULL DEFAULT '',
+            activation_id   TEXT NOT NULL,
+            phone_masked    TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL, -- pending / success / failed
+            reason          TEXT NOT NULL DEFAULT '',
+            started_at      REAL,
+            finished_at     REAL,
+            UNIQUE(provider, activation_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sms_success_provider ON sms_success_records(provider, manufacturer, status);
+        CREATE INDEX IF NOT EXISTS idx_sms_success_started ON sms_success_records(started_at DESC);
     """)
     con.commit()
     # 老 DB migrate：error_category 在后期才加，对已建表补列
@@ -134,6 +154,23 @@ def init_db():
     if "totp_factor_id" not in reg_cols:
         con.execute("ALTER TABLE registered ADD COLUMN totp_factor_id TEXT")
         con.commit()
+
+    cur = con.execute("PRAGMA table_info(sms_success_records)")
+    sms_cols = {r[1] for r in cur.fetchall()}
+    for col, ddl in (
+        ("run_id", "ALTER TABLE sms_success_records ADD COLUMN run_id TEXT"),
+        ("email", "ALTER TABLE sms_success_records ADD COLUMN email TEXT"),
+        ("manufacturer", "ALTER TABLE sms_success_records ADD COLUMN manufacturer TEXT NOT NULL DEFAULT ''"),
+        ("country", "ALTER TABLE sms_success_records ADD COLUMN country TEXT NOT NULL DEFAULT ''"),
+        ("phone_prefix", "ALTER TABLE sms_success_records ADD COLUMN phone_prefix TEXT NOT NULL DEFAULT ''"),
+        ("phone_masked", "ALTER TABLE sms_success_records ADD COLUMN phone_masked TEXT NOT NULL DEFAULT ''"),
+        ("reason", "ALTER TABLE sms_success_records ADD COLUMN reason TEXT NOT NULL DEFAULT ''"),
+        ("started_at", "ALTER TABLE sms_success_records ADD COLUMN started_at REAL"),
+        ("finished_at", "ALTER TABLE sms_success_records ADD COLUMN finished_at REAL"),
+    ):
+        if col not in sms_cols:
+            con.execute(ddl)
+            con.commit()
 
 
 # ──────────────────────── outlook 号池 ────────────────────────
@@ -482,6 +519,120 @@ def stats() -> dict:
         out[r["status"]] = r["n"]
         out["total"] += r["n"]
     return out
+
+
+# ──────────────────────── 接码成功率记录 ────────────────────────
+
+
+def _mask_phone(phone: str) -> str:
+    s = "".join(ch for ch in str(phone or "") if ch.isdigit() or ch == "+")
+    if len(s) <= 7:
+        return s
+    return f"{s[:4]}****{s[-3:]}"
+
+
+def _phone_prefix(phone: str) -> str:
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    return digits[:5] if len(digits) >= 5 else digits
+
+
+def record_sms_attempt(
+    *,
+    provider: str,
+    activation_id: str,
+    run_id: str = "",
+    email: str = "",
+    manufacturer: str = "",
+    country: str = "",
+    phone_number: str = "",
+    status: str = "pending",
+    reason: str = "",
+) -> None:
+    provider = (provider or "sms").strip() or "sms"
+    activation_id = (activation_id or "").strip()
+    if not activation_id:
+        return
+    now = time.time()
+    clean_status = (status or "pending").strip().lower()
+    if clean_status not in {"pending", "success", "failed"}:
+        clean_status = "pending"
+    with _lock:
+        con = _conn()
+        con.execute(
+            "INSERT INTO sms_success_records "
+            "(run_id, email, provider, manufacturer, country, phone_prefix, activation_id, "
+            "phone_masked, status, reason, started_at, finished_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(provider, activation_id) DO UPDATE SET "
+            "run_id=COALESCE(NULLIF(excluded.run_id, ''), sms_success_records.run_id), "
+            "email=COALESCE(NULLIF(excluded.email, ''), sms_success_records.email), "
+            "manufacturer=COALESCE(NULLIF(excluded.manufacturer, ''), sms_success_records.manufacturer), "
+            "country=COALESCE(NULLIF(excluded.country, ''), sms_success_records.country), "
+            "phone_prefix=COALESCE(NULLIF(excluded.phone_prefix, ''), sms_success_records.phone_prefix), "
+            "phone_masked=COALESCE(NULLIF(excluded.phone_masked, ''), sms_success_records.phone_masked), "
+            "status=excluded.status, "
+            "reason=CASE WHEN excluded.reason='cleanup' AND sms_success_records.reason != '' "
+            "THEN sms_success_records.reason ELSE excluded.reason END, "
+            "finished_at=excluded.finished_at",
+            (
+                run_id,
+                (email or "").strip().lower(),
+                provider,
+                manufacturer or country or "",
+                country or "",
+                _phone_prefix(phone_number),
+                activation_id,
+                _mask_phone(phone_number),
+                clean_status,
+                (reason or "")[:500],
+                now,
+                now if clean_status in {"success", "failed"} else None,
+            ),
+        )
+        con.commit()
+
+
+def sms_success_rate_summary() -> dict:
+    con = _conn()
+
+    def _rows(group_cols: list[str]) -> list[dict]:
+        select_cols = ", ".join(group_cols)
+        cur = con.execute(
+            f"SELECT {select_cols}, "
+            "COUNT(*) AS total, "
+            "SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) AS success, "
+            "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed, "
+            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending, "
+            "MAX(started_at) AS last_started_at "
+            "FROM sms_success_records GROUP BY " + select_cols
+        )
+        out = []
+        for r in cur.fetchall():
+            total = int(r["total"] or 0)
+            success = int(r["success"] or 0)
+            failed = int(r["failed"] or 0)
+            decided = success + failed
+            item = dict(r)
+            item.update({
+                "total": total,
+                "success": success,
+                "failed": failed,
+                "pending": int(r["pending"] or 0),
+                "success_rate": round(success * 100 / decided, 2) if decided else 0,
+            })
+            out.append(item)
+        return out
+
+    records = [
+        dict(r) for r in con.execute(
+            "SELECT * FROM sms_success_records ORDER BY started_at DESC LIMIT 200"
+        ).fetchall()
+    ]
+    return {
+        "by_provider": _rows(["provider"]),
+        "by_manufacturer": _rows(["provider", "manufacturer", "country", "phone_prefix"]),
+        "records": records,
+    }
 
 
 # ──────────────────────── 注册结果存储 ────────────────────────

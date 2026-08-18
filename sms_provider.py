@@ -910,6 +910,7 @@ class PhoneCallbackController:
         country: str = "",
         log_fn: Optional[Callable[[str], None]] = None,
         auto_select_country: bool = False,
+        record_fn: Optional[Callable[[str, dict], None]] = None,
     ):
         self.provider_key = provider_key
         self.config = dict(config or {})
@@ -921,6 +922,7 @@ class PhoneCallbackController:
         self.activation: Optional[SmsActivation] = None
         self.completed = False
         self._verify_lock_acquired = False
+        self.record = record_fn or (lambda _event, _payload: None)
 
     def _provider(self) -> BaseSmsProvider:
         if self.provider is None:
@@ -1003,6 +1005,14 @@ class PhoneCallbackController:
         used_country_label = f"{used_country} {SMS_COUNTRY_NAMES_CN.get(used_country, '')}"
         self.log(f"✅ 已租到号码{'(复用)' if reused else ''}: {self.activation.phone_number} "
                  f"国家={used_country_label} (activation_id={self.activation.activation_id})")
+        self.record("attempt", {
+            "provider": getattr(provider, "name", self.provider_key),
+            "activation_id": self.activation.activation_id,
+            "phone_number": self.activation.phone_number,
+            "country": used_country,
+            "manufacturer": used_country_label.strip(),
+            "reused": reused,
+        })
         return self.activation.phone_number
 
     def get_code(self, timeout: int = 180) -> str:
@@ -1027,6 +1037,10 @@ class PhoneCallbackController:
             except Exception as e:
                 logger.warning("report_success 失败: %s", e)
             self.completed = True
+            self.record("success", {
+                "provider": getattr(self.provider, "name", self.provider_key),
+                "activation_id": self.activation.activation_id,
+            })
             self.log(f"🎉 已标记号码成功完成: activation_id={self.activation.activation_id}")
         self._release_lock()
 
@@ -1036,6 +1050,11 @@ class PhoneCallbackController:
                 self.provider.mark_code_failed(self.activation.activation_id, reason=reason)
             except Exception:
                 pass
+            self.record("failed", {
+                "provider": getattr(self.provider, "name", self.provider_key),
+                "activation_id": self.activation.activation_id,
+                "reason": reason or "code failed",
+            })
 
     def mark_send_succeeded(self) -> None:
         if self.activation and self.provider:
@@ -1050,6 +1069,11 @@ class PhoneCallbackController:
                 self.provider.mark_send_failed(self.activation.activation_id, reason=reason)
             except Exception:
                 pass
+            self.record("failed", {
+                "provider": getattr(self.provider, "name", self.provider_key),
+                "activation_id": self.activation.activation_id,
+                "reason": reason or "send failed",
+            })
 
     def set_resend_callback(self, callback: Optional[Callable[[], None]]) -> None:
         try:
@@ -1066,6 +1090,11 @@ class PhoneCallbackController:
                 self.log(f"🗑️ {tag}: activation_id={self.activation.activation_id}")
             except Exception:
                 pass
+            self.record("failed", {
+                "provider": getattr(self.provider, "name", self.provider_key),
+                "activation_id": self.activation.activation_id,
+                "reason": "cleanup",
+            })
         self._release_lock()
 
     def _release_lock(self) -> None:

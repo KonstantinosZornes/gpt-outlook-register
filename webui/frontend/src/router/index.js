@@ -54,6 +54,12 @@ const routes = [
     meta: { title: '运行记录', icon: 'Document', group: '数据' },
   },
   {
+    path: '/sms-rate',
+    name: 'smsRate',
+    component: () => import('@/views/SmsRate.vue'),
+    meta: { title: '接码成功率', icon: 'Iphone', group: '数据' },
+  },
+  {
     path: '/settings/mail',
     name: 'mail',
     component: () => import('@/views/MailConfig.vue'),

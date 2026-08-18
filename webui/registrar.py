@@ -667,6 +667,27 @@ def _build_sms_callback(run_id: str, email_ref: Optional[dict] = None) -> Option
         except Exception:
             pass
 
+    def _record_sms(event: str, payload: dict) -> None:
+        try:
+            status = {
+                "attempt": "pending",
+                "success": "success",
+                "failed": "failed",
+            }.get(event, "pending")
+            db.record_sms_attempt(
+                run_id=run_id,
+                email=(email_ref or {}).get("email") or "",
+                provider=payload.get("provider") or cfg.get("sms_provider") or "sms",
+                activation_id=payload.get("activation_id") or "",
+                manufacturer=payload.get("manufacturer") or "",
+                country=payload.get("country") or "",
+                phone_number=payload.get("phone_number") or "",
+                status=status,
+                reason=payload.get("reason") or "",
+            )
+        except Exception as e:
+            smslog.warning(f"[sms] 成功率记录写入失败: {e}")
+
     try:
         return PhoneCallbackController(
             provider_key=cfg["sms_provider"],
@@ -675,6 +696,7 @@ def _build_sms_callback(run_id: str, email_ref: Optional[dict] = None) -> Option
             country=cfg.get("sms_country") or "52",
             log_fn=_log,
             auto_select_country=bool(cfg.get("sms_auto_country")),
+            record_fn=_record_sms,
         )
     except Exception as e:
         smslog.warning(f"[sms] 创建接码 controller 失败: {e}")

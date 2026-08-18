@@ -692,6 +692,12 @@ def api_sms_all_countries(provider: str = ""):
             "openai_sms_safe": list(OPENAI_SMS_COUNTRIES), "source": "static"}
 
 
+@app.get("/api/sms/success-rate")
+def api_sms_success_rate():
+    """接码成功率统计：按供应商、厂家/国家号段聚合，并返回最近明细。"""
+    return {"ok": True, **db.sms_success_rate_summary()}
+
+
 # ──────────────────────── 自动导出 (CPA / SUB2API) ────────────────────────
 
 
