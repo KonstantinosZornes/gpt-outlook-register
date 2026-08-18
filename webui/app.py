@@ -17,6 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -54,7 +56,18 @@ logger = logging.getLogger("webui")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-app = FastAPI(title="GPT Outlook Register WebUI", docs_url=None, redoc_url=None)
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    from sms_cancel_queue import get_sms_cancel_queue
+    get_sms_cancel_queue().start()
+    try:
+        yield
+    finally:
+        get_sms_cancel_queue().stop()
+
+
+app = FastAPI(title="GPT Outlook Register WebUI", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 # ──────────────────────── Pydantic 模型 ────────────────────────

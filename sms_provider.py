@@ -657,7 +657,7 @@ class SmsBowerProvider(BaseSmsProvider):
             return False
 
     def wait_for_code(self, activation_id: str, *, timeout: int = 80, poll: int = 3,
-                       openai_resend_interval: int = 20,
+                       openai_resend_interval: int = 60,
                        openai_resend_max: int = 3) -> Optional[dict]:
         """等 SMS 验证码：每 `openai_resend_interval` 秒触发一次 OpenAI 端 resend，
         最多 `openai_resend_max` 次。超过 timeout 仍没收到 → 返回 None（由上层 cancel 换号）。
@@ -721,23 +721,50 @@ class SmsBowerProvider(BaseSmsProvider):
 
     # ---- 状态报告 ----
 
-    def cancel(self, activation_id: str) -> bool:
-        try:
-            resp = self._request({"action": "cancelActivation", "id": activation_id})
-            ok = resp.status_code == 204 or "ACCESS_CANCEL" in resp.text
-        except Exception:
-            ok = False
-        if not ok:
-            try:
-                resp = self._request({"action": "setStatus", "id": activation_id, "status": 8})
-                ok = "ACCESS_CANCEL" in resp.text
-            except Exception:
-                ok = False
+    def _enqueue_cancel(self, activation_id: str, reason: str = "") -> None:
+        from sms_cancel_queue import get_sms_cancel_queue
+        get_sms_cancel_queue().enqueue(
+            order_id=activation_id,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            provider=self.name,
+            reason=reason,
+            proxies=self._proxies,
+        )
+
+    def cancel(self, activation_id: str, reason: str = "") -> bool:
+        from sms_cancel_queue import (
+            cancel_order, is_cancel_success, is_early_cancel_denied,
+        )
         with _SMS_CACHE_LOCK:
             cache = _SMS_CACHE
             if cache and str(cache.get("activation_id")) == str(activation_id):
                 self._clear_cache()
-        return ok
+        try:
+            code, body = cancel_order(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                order_id=activation_id,
+                proxies=self._proxies,
+            )
+        except Exception as e:
+            logger.warning("%s cancel 请求失败 id=%s: %s → 入队", self.name, activation_id, e)
+            self._enqueue_cancel(activation_id, reason or "cancel request error")
+            return False
+        if is_cancel_success(code, body):
+            return True
+        if is_early_cancel_denied(code, body):
+            logger.warning(
+                "%s 未满 120s 无法取消 id=%s HTTP=%s → 入队",
+                self.name, activation_id, code,
+            )
+        else:
+            logger.warning(
+                "%s cancel 失败 id=%s HTTP=%s body=%s → 入队",
+                self.name, activation_id, code, (body or "")[:160],
+            )
+        self._enqueue_cancel(activation_id, reason or "EARLY_CANCEL_DENIED")
+        return False
 
     def report_success(self, activation_id: str) -> bool:
         with _SMS_CACHE_LOCK:
@@ -801,24 +828,11 @@ class SmsBowerProvider(BaseSmsProvider):
 
     def mark_send_failed(self, activation_id: str, reason: str = "") -> None:
         # 业务侧拒了这个号 → cancel 退款（号根本没用上，不能让主人白花钱）
-        cancel_ok = False
-        try:
-            resp = self._request({"action": "setStatus", "id": activation_id, "status": 8})
-            cancel_ok = "ACCESS_CANCEL" in resp.text or resp.status_code in (200, 204)
-        except Exception:
-            pass
-        # 简化原因显示：只保留前 80 字符
         short_reason = (reason or "未知原因")[:80]
+        cancel_ok = self.cancel(activation_id, reason=short_reason)
         logger.info("%s 号 activation_id=%s cancel 退款 %s (原因: %s)",
-                    self.name, activation_id, "✅" if cancel_ok else "❌", short_reason)
-        # 同时清掉复用缓存（避免下次注册又拿到这个被拒的号）
-        with _SMS_CACHE_LOCK:
-            cache = _SMS_CACHE
-            if cache and str(cache.get("activation_id")) == str(activation_id):
-                cache["reuse_stopped"] = True
-                cache["stop_reason"] = reason or "phone rejected"
-                self._save_cache(cache)
-                self._clear_cache()
+                    self.name, activation_id,
+                    "✅" if cancel_ok else "⏳ 已入队等 120s", short_reason)
 
     def set_resend_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._resend_callback = callback
@@ -1047,8 +1061,9 @@ class PhoneCallbackController:
         """流程结束（成功或失败）调用：释放未完成的号、解锁。"""
         if self.activation and not self.completed and self.provider:
             try:
-                self.provider.cancel(self.activation.activation_id)
-                self.log(f"🗑️ 已释放未使用号码: activation_id={self.activation.activation_id}")
+                ok = self.provider.cancel(self.activation.activation_id, reason="cleanup")
+                tag = "已释放" if ok else "已入队延迟取消"
+                self.log(f"🗑️ {tag}: activation_id={self.activation.activation_id}")
             except Exception:
                 pass
         self._release_lock()
