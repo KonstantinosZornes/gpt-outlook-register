@@ -1131,6 +1131,16 @@ class AuthFlow:
             sl = (s or "").lower()
             return any(p in sl for p in _PHONE_REJECTED_PATTERNS)
 
+        def _reauthorize_before_next(attempt_no: int) -> Optional[str]:
+            """换下一个号之前，先重新走一遍 Codex authorize 把会话状态机拉回 add_phone。
+
+            返回 None=复位失败（停止换号）；''=已回到 add_phone（可继续换号）；
+            非空 URL=意外直接拿到 callback code（整个流程已完成）。
+            """
+            if attempt_no >= max_phone_attempts:
+                return None
+            return self._codex_reauthorize_to_add_phone(attempt_no)
+
         last_err: Optional[Exception] = None
 
         for phone_attempt in range(1, max_phone_attempts + 1):
@@ -1175,6 +1185,18 @@ class AuthFlow:
                                phone, err_text[:300])
                 ctrl.mark_send_failed(err_text)
                 last_err = e
+                if "invalid_auth_step" in err_text.lower() \
+                        or "invalid authorization step" in err_text.lower():
+                    # 会话状态机已不在 add_phone（例如上一个号已把状态推进到
+                    # phone_otp_verification），先重新走一遍 authorize 复位再换号
+                    logger.warning("[sms] 会话不在 add-phone 状态，先复位状态机再换号 ...")
+                    reset = _reauthorize_before_next(phone_attempt)
+                    if reset is None:
+                        logger.warning("[sms] 状态机复位失败，停止换号")
+                        break
+                    if reset:
+                        logger.info("[sms] 复位后直接拿到 callback URL，无需再绑号")
+                        return reset
                 continue
 
             send_page_type = self._extract_page_type(send_resp)
@@ -1241,10 +1263,53 @@ class AuthFlow:
                 pass
             # cleanup 清掉 controller.activation，下一轮 get_phone 会租新号
 
+            # 换下一个号之前，先重新走一遍 Codex authorize 复位会话状态机，
+            # 否则 session 停在 phone_otp_verification，add-phone/send 会 400 invalid_auth_step
+            if phone_attempt < max_phone_attempts:
+                reset = _reauthorize_before_next(phone_attempt)
+                if reset is None:
+                    logger.warning("[sms] 状态机复位失败，停止换号")
+                    break
+                if reset:
+                    logger.info("[sms] 复位后直接拿到 callback URL，无需再绑号")
+                    return reset
+
         # 所有号都失败
         if last_err:
             raise last_err
         raise RuntimeError(f"SMS 接码 {max_phone_attempts} 个号均失败")
+
+    def _codex_reauthorize_to_add_phone(self, attempt_no: int) -> Optional[str]:
+        """单号超时后重新走一遍 Codex authorize，把会话状态机拉回 add_phone。
+
+        返回：
+          None          → 复位失败（停止换号）
+          ""            → 已回到 add_phone 状态，可继续换下一个号
+          非空 URL       → 意外直接拿到 callback/final URL，整个流程已完成
+        """
+        auth_url = self._oauth_auth_url or ""
+        redirect_uri = self._oauth_redirect_uri or ""
+        if not auth_url or not redirect_uri:
+            # 非 Codex 路径（env / chatgpt 登录流）没有 authorize 上下文，
+            # 无法复位状态机，保持旧行为继续换号（由调用方决定是否停止）
+            logger.warning("[sms] 无 Codex authorize 上下文（_oauth_auth_url 为空），跳过状态机复位")
+            return ""
+        logger.info("[sms] 第 %d 个号失败，重新走一遍 Codex authorize 复位状态机 ...", attempt_no)
+        try:
+            callback_url, final_url = self._follow_authorize_for_callback(
+                auth_url, redirect_uri, f"codex_reauthorize_after_phone_{attempt_no}"
+            )
+        except Exception as e:
+            logger.warning("[sms] 重新 authorize 异常: %s", e)
+            return None
+        if callback_url:
+            logger.info("[sms] 重新 authorize 直接拿到 callback code，无需再绑号")
+            return callback_url
+        if self._is_add_phone_state(page_type="", continue_url=final_url or ""):
+            logger.info("[sms] ✅ 已回到 add-phone 状态，继续换号")
+            return ""
+        logger.warning("[sms] 重新 authorize 后未回到 add-phone: %s", (final_url or "")[:160])
+        return None
 
     def _handle_add_phone_via_env(self, continue_url: str = "") -> str:
         """
