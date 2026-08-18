@@ -182,6 +182,7 @@ def _do_register(
 
     email = account["email"]
     current_email = email
+    email_ref = {"email": email}
     # 提前读取，避免在 try 块前异常时 except 引用未定义
     mail_source = db.get_setting("mail_source", "outlook")
     # 要不要操作号池（mark_done / mark_failed / release）由 provider 声明的
@@ -260,6 +261,7 @@ def _do_register(
                     and real_email != current_email
                 ):
                     current_email = real_email
+                    email_ref["email"] = real_email
                     try:
                         db.update_run_email(run_id, real_email)
                     except Exception:
@@ -333,7 +335,7 @@ def _do_register(
 
         flow = AuthFlow(
             cfg,
-            sms_callback=_build_sms_callback(run_id),
+            sms_callback=_build_sms_callback(run_id, email_ref),
             env_overrides=env_overrides,
             on_password=_save_password_early,
             on_session_ready=_bind_2fa_hook if options.get("want_2fa") else None,
@@ -472,7 +474,7 @@ def _do_register(
             mail.on_success("注册成功")
 
         # ─ 可选：导出到 CPA / SUB2API 面板（仅勾选启用时才执行） ─
-        _try_export_to_panels(run_id, d)
+        _try_export_to_panels(run_id, d, email_ref=email_ref)
 
         result_summary = {
             "email": d.get("email"),
@@ -555,7 +557,7 @@ def _do_register(
         _current_run.run_id = None
 
 
-def _try_export_to_panels(run_id: str, cred: dict) -> None:
+def _try_export_to_panels(run_id: str, cred: dict, email_ref: Optional[dict] = None) -> None:
     """注册完成后可选地把凭证导出到 CPA / SUB2API 面板。
 
     - 任一目标的"启用"开关关闭时,该目标跳过(不发请求);两者都未启用时整段 no-op。
@@ -584,7 +586,10 @@ def _try_export_to_panels(run_id: str, cred: dict) -> None:
         else:
             explog.info(f"[export] {msg}")
         try:
-            _emit_status(run_id, "phase", {"phase": "export", "message": msg, "level": level})
+            _emit_status(run_id, "phase", {
+                "phase": "export", "message": msg, "level": level,
+                "email": (email_ref or {}).get("email") or cred.get("email") or "",
+            })
         except Exception:
             pass
 
@@ -608,7 +613,10 @@ def _try_export_to_panels(run_id: str, cred: dict) -> None:
         summary["sub2api"] = {"ok": bool(results["sub2api"].get("ok")),
                               "message": results["sub2api"].get("message") or results["sub2api"].get("error") or ""}
     try:
-        _emit_status(run_id, "phase", {"phase": "export_done", "summary": summary})
+        _emit_status(run_id, "phase", {
+            "phase": "export_done", "summary": summary,
+            "email": (email_ref or {}).get("email") or cred.get("email") or "",
+        })
     except Exception:
         pass
 
@@ -632,7 +640,7 @@ def _save_password_early(email: str, password: str) -> None:
         log.warning(f"[register] 密码落盘失败，仅剩日志兜底: {e}")
 
 
-def _build_sms_callback(run_id: str) -> Optional[PhoneCallbackController]:
+def _build_sms_callback(run_id: str, email_ref: Optional[dict] = None) -> Optional[PhoneCallbackController]:
     """根据 webui 配置创建 SMS 接码 controller。
 
     未启用接码或未配置 API key 时返回 None，flow 会回退到环境变量路径。
@@ -652,7 +660,10 @@ def _build_sms_callback(run_id: str) -> Optional[PhoneCallbackController]:
         # 既写日志、又通过 _emit_status 推 phase 事件给前端
         smslog.info(f"[sms] {msg}")
         try:
-            _emit_status(run_id, "phase", {"phase": "sms", "message": msg})
+            _emit_status(run_id, "phase", {
+                "phase": "sms", "message": msg,
+                "email": (email_ref or {}).get("email") or "",
+            })
         except Exception:
             pass
 
