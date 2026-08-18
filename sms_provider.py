@@ -8,13 +8,14 @@
 
 ⚠️ 关键事实：OpenAI 自 2025 年起对大部分国家改用 WhatsApp 验证，**纯 SMS 路径目前只有
 泰国（country_id=52）确认可用**。其它国家可能抽到 WhatsApp 号导致拿不到 SMS。
-SmsBower 的 `auto_select_country=True` 会按价格 + 库存自动选号。
+`auto_select_country=True` 会从有库存的国家里随机选号。
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import random
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -376,11 +377,11 @@ class SmsBowerProvider(BaseSmsProvider):
                          min_stock: int = 20, max_price: float = 0,
                          strict_whitelist: bool = False,
                          allowed_countries: Optional[list[str]] = None) -> Optional[str]:
-        """自动选最优国家。
+        """从满足库存/价格条件的国家里随机挑一个。
 
-        allowed_countries 优先级最高（用户自定义 = 从这些国家里挑最便宜+库存足的）
+        allowed_countries 优先级最高（只从这些国家里抽）
         strict_whitelist  = True → 只从 OPENAI_SMS_COUNTRIES 选（即 52 泰国）
-        都没设 → 全部国家自由选（默认；用户自行承担"OpenAI 让用 WhatsApp"的风险）
+        都没设 → 全部国家自由抽（默认；用户自行承担"OpenAI 让用 WhatsApp"的风险）
         """
         try:
             rows = self.get_top_countries(service=service)
@@ -394,10 +395,10 @@ class SmsBowerProvider(BaseSmsProvider):
         if allowed_countries:
             allowed_set = {str(c).strip() for c in allowed_countries if str(c).strip()}
 
-        def _pick(stock_threshold: int) -> Optional[str]:
+        def _eligible(stock_threshold: int) -> list[tuple]:
+            out = []
             for row in rows:
                 cid = str(row.get("country") or "")
-                # 优先用 user-supplied 白名单
                 if allowed_set is not None:
                     if cid not in allowed_set:
                         continue
@@ -409,17 +410,20 @@ class SmsBowerProvider(BaseSmsProvider):
                     continue
                 if max_price > 0 and price > max_price:
                     continue
-                # 非白名单国家 → warn 一下（不阻止）
-                if not strict_whitelist and cid not in OPENAI_SMS_COUNTRIES:
-                    logger.warning(
-                        "%s 自动选了非 OpenAI-SMS 白名单国家 country=%s price=%s "
-                        "（OpenAI 可能让此号用 WhatsApp 验证 → 收不到 SMS）",
-                        self.name, cid, price,
-                    )
-                return cid
-            return None
+                out.append((cid, price))
+            return out
 
-        return _pick(min_stock) or _pick(1)
+        pool = _eligible(min_stock) or _eligible(1)
+        if not pool:
+            return None
+        cid, price = random.choice(pool)
+        if not strict_whitelist and cid not in OPENAI_SMS_COUNTRIES:
+            logger.warning(
+                "%s 随机选了非 OpenAI-SMS 白名单国家 country=%s price=%s "
+                "（OpenAI 可能让此号用 WhatsApp 验证 → 收不到 SMS）",
+                self.name, cid, price,
+            )
+        return cid
 
     # ---- 号码复用缓存 ----
 
@@ -430,7 +434,7 @@ class SmsBowerProvider(BaseSmsProvider):
             "country": str(country),
         }
 
-    def _load_cache(self, service: str, country: str) -> Optional[dict]:
+    def _load_cache(self, service: str, country: str = "") -> Optional[dict]:
         global _SMS_CACHE
         cache = _SMS_CACHE
         if cache is None:
@@ -442,8 +446,11 @@ class SmsBowerProvider(BaseSmsProvider):
             except Exception:
                 return None
         identity = self._cache_identity(service, country)
-        if any(str(cache.get(k) or "") != str(v) for k, v in identity.items()):
-            return None
+        for k, v in identity.items():
+            if k == "country" and not country:
+                continue
+            if str(cache.get(k) or "") != str(v):
+                return None
         elapsed = time.time() - float(cache.get("acquired_at") or 0)
         if elapsed >= SMS_PHONE_LIFETIME or cache.get("reuse_stopped"):
             self._clear_cache()
@@ -554,7 +561,7 @@ class SmsBowerProvider(BaseSmsProvider):
         with _SMS_VERIFY_LOCK:
             with _SMS_CACHE_LOCK:
                 # 复用 cache（仅当用户许可且 cache 国家在候选列表里）
-                cache = self._load_cache(service_code, country_candidates[0]) if self.reuse_phone_to_max else None
+                cache = self._load_cache(service_code) if self.reuse_phone_to_max else None
                 if cache and str(cache.get("country") or "") in country_candidates:
                     activation = SmsActivation(
                         activation_id=str(cache["activation_id"]),
@@ -923,22 +930,20 @@ class PhoneCallbackController:
 
         if self.auto_select_country and isinstance(provider, SmsBowerProvider):
             if allowed_list:
-                self.log(f"🔍 自动选号: 从主人勾选的 {len(allowed_list)} 个国家依次尝试（按价格升序）")
+                self.log(f"🔍 自动选号: 从主人勾选的 {len(allowed_list)} 个国家随机尝试")
                 try:
                     rows = provider.get_top_countries(service=self.service)
-                    # 按价格升序排，只保留在 allowed_list 中的
-                    in_allow = [r for r in rows if str(r.get("country") or "") in allowed_list]
-                    ordered_allowed = [str(r["country"]) for r in in_allow]
-                    # 把 allowed 里没在排名中出现的也加在最后
-                    appended = [c for c in allowed_list if c not in ordered_allowed]
-                    country_candidates = ordered_allowed + appended
-                    self.log(f"  候选顺序: {','.join(country_candidates)}")
+                    in_allow = [str(r["country"]) for r in rows if str(r.get("country") or "") in allowed_list]
+                    appended = [c for c in allowed_list if c not in in_allow]
+                    country_candidates = in_allow + appended
+                    random.shuffle(country_candidates)
+                    self.log(f"  随机顺序: {','.join(country_candidates)}")
                 except Exception as e:
-                    self.log(f"  排名查询失败({e})，按主人勾选的原始顺序尝试")
                     country_candidates = list(allowed_list)
+                    random.shuffle(country_candidates)
+                    self.log(f"  排名查询失败({e})，按随机顺序尝试")
             else:
-                # 未多选时，单纯按价格选最便宜（默认非严格白名单）
-                self.log("🔍 自动选号（未指定允许国家，按全平台价格+库存挑最优）...")
+                self.log("🔍 自动选号（未指定允许国家，从有库存国家里随机挑）...")
                 try:
                     best = provider.get_best_country(
                         service=self.service,
@@ -950,7 +955,7 @@ class PhoneCallbackController:
                         name_cn = SMS_COUNTRY_NAMES_CN.get(best, "未知")
                         in_wl = best in OPENAI_SMS_COUNTRIES
                         wl_label = "✅ OpenAI SMS 白名单" if in_wl else "⚠️ 非白名单"
-                        self.log(f"✅ 自动选择国家: {best} {name_cn}  [{wl_label}]")
+                        self.log(f"✅ 随机选择国家: {best} {name_cn}  [{wl_label}]")
                         country_candidates = [best]
                     else:
                         self.log("⚠️ 未找到满足条件的国家，使用默认 country")

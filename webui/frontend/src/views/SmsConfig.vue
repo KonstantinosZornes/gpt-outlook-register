@@ -141,7 +141,7 @@ onActivated(() => load())
           </el-col>
         </el-row>
 
-        <el-divider content-position="left">选号策略（按价格 + 库存自动挑国家）</el-divider>
+        <el-divider content-position="left">选号策略（有库存的国家里每次随机挑）</el-divider>
         <el-form-item label="允许使用的国家（多选，可搜索）">
           <el-select
             v-model="allowed" multiple filterable clearable collapse-tags collapse-tags-tooltip
@@ -153,7 +153,7 @@ onActivated(() => load())
             </el-option>
           </el-select>
           <div class="hint" style="margin-top: 4px">
-            已选 {{ allowed.length }} 个国家 · 留空 = 全平台自动挑最便宜的；只勾 1 个 = 锁死用这个国家
+            已选 {{ allowed.length }} 个国家 · 留空 = 全平台有库存的国家里随机挑；只勾 1 个 = 锁死用这个国家
           </div>
         </el-form-item>
         <el-row :gutter="16">
@@ -206,7 +206,7 @@ onActivated(() => load())
     </el-card>
 
     <FooterToolbar>
-      <template #left>接码平台：{{ provider === 'herosms' ? 'HeroSMS' : 'SmsBower' }}{{ allowed.length ? ` · 允许国家 ${allowed.length} 个` : ' · 全平台自动选号' }}</template>
+      <template #left>接码平台：{{ provider === 'herosms' ? 'HeroSMS' : 'SmsBower' }}{{ allowed.length ? ` · 允许国家 ${allowed.length} 个` : ' · 全平台随机选号' }}</template>
       <el-button :loading="testing" @click="test">测试余额</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
     </FooterToolbar>
