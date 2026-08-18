@@ -25,6 +25,7 @@ from mail_providers import (  # noqa: E402
     create_mail_provider,
     get_provider_class,
 )
+from proxy_utils import ensure_sticky_proxy, mask_proxy_url  # noqa: E402
 from sms_provider import PhoneCallbackController  # noqa: E402
 
 from . import db  # noqa: E402
@@ -189,6 +190,7 @@ def _do_register(
         is_pooled = get_provider_class(mail_source).pooled
     except MailProviderError:
         is_pooled = True
+    mail = None
 
     try:
         # 本次注册专属的配置覆盖。
@@ -210,7 +212,16 @@ def _do_register(
         # PROXY 走 cfg.proxy，无需 env
 
         cfg = Config()
-        cfg.proxy = (options.get("proxy") or "").strip() or None
+        raw_proxy = (options.get("proxy") or "").strip() or None
+        # DataImpulse 等住宅网关：每次注册注入唯一 sessid，全程 sticky，防 mid-run 换 IP → invalid_state
+        cfg.proxy = (
+            ensure_sticky_proxy(raw_proxy, session_id=run_id.replace("-", "")[:12])
+            if raw_proxy else None
+        )
+        if cfg.proxy:
+            logging.getLogger("registrar").info(
+                f"[register] 代理 {mask_proxy_url(cfg.proxy)}"
+            )
 
         # ─ 邮箱来源路由 ─
         # 原来是 if cf_temp / else outlook 的写死分支，加一种邮箱就得回来改。
@@ -219,6 +230,44 @@ def _do_register(
         logging.getLogger("registrar").info(
             f"[register] 邮箱来源: {mail_source} ({mail.display_name})"
         )
+
+        specified_email = (options.get("specified_email") or "").strip() or None
+        if specified_email and getattr(mail, "supports_specified_email", False):
+            ok, msg = mail.set_specified_email(specified_email)
+            if ok:
+                logging.getLogger("registrar").info(
+                    f"[register] 指定邮箱: {specified_email}"
+                )
+            elif options.get("strict_email", True):
+                raise RuntimeError(
+                    f"指定邮箱 {specified_email} 不可用 ({msg})；停止注册流程"
+                )
+            else:
+                logging.getLogger("registrar").warning(
+                    f"[register] 指定邮箱 {specified_email} 不可用 ({msg})，回退随机 claim"
+                )
+
+        if mail is not None and not is_pooled:
+            _orig_create_mailbox = mail.create_mailbox
+
+            def _wrapped_create_mailbox():
+                em = _orig_create_mailbox()
+                real_email = em or getattr(mail, "email", "") or email
+                if (
+                    real_email and "@" in real_email
+                    and "placeholder.local" not in real_email
+                ):
+                    try:
+                        db.update_run_email(run_id, real_email)
+                    except Exception:
+                        pass
+                    _emit_status(
+                        run_id, "phase",
+                        {"phase": "email_claimed", "email": real_email},
+                    )
+                return em
+
+            mail.create_mailbox = _wrapped_create_mailbox
 
         # ─ 2FA 绑定钩子：插在「拿到 session」和「Codex 授权」之间 ─
         #   主人指定的顺序：注册完 → 绑 2FA → Codex 授权 → 接码。
@@ -413,6 +462,8 @@ def _do_register(
         # 号池里根本没这行，不能去 mark。判据用 provider 的 pooled，不写死 kind。
         if is_pooled:
             db.mark_done(email)
+        if mail is not None:
+            mail.on_success("注册成功")
 
         # ─ 可选：导出到 CPA / SUB2API 面板（仅勾选启用时才执行） ─
         _try_export_to_panels(run_id, d)
@@ -470,6 +521,11 @@ def _do_register(
                 )
             else:
                 db.mark_failed(email, f"[{category}] {err}")
+        elif mail is not None:
+            if category == "account" and getattr(mail, "exhausted", False):
+                pass
+            else:
+                mail.on_release(f"[{category}] {err}"[:200])
         db.finish_run(run_id, "failed", err, category=category)
         _emit_status(run_id, "error", {"message": err, "category": category})
 

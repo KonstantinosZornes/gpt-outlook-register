@@ -82,6 +82,7 @@ class RegisterReq(BaseModel):
     # 缓存 / 直接打 API 的保守兜底：漏传时宁可不绑，也不替调用方做一个不可逆的决定。
     # 真实默认值由前端 form store 的 want2fa / autoWant2fa 决定。
     want_2fa: bool = False
+    strict_email: bool = True
 
 
 # ──────────────────────── API ────────────────────────
@@ -260,17 +261,29 @@ def api_register(req: RegisterReq):
 
     # 要不要 claim 号池，由 provider 自己声明的 pooled 决定 ——
     # 原来写死 `mail_source == "cf_temp"`，加一种非池化邮箱就得改这里。
+    specified_email = None
     if not provider_cls.pooled:
-        # 非池化：地址由 provider 现造，用占位 account 走完后面的流程
-        import time as _t
-        account = {
-            "email": f"{mail_source}_placeholder_{int(_t.time())}@placeholder.local",
-            "password": "",
-            "client_id": "",
-            "refresh_token": "",
-            "relay_url": "",
-            "kind": mail_source,
-        }
+        specified = (req.email or "").strip() or None
+        if specified and getattr(provider_cls, "supports_specified_email", False):
+            specified_email = specified
+            account = {
+                "email": specified_email,
+                "password": "",
+                "client_id": "",
+                "refresh_token": "",
+                "relay_url": "",
+                "kind": mail_source,
+            }
+        else:
+            import time as _t
+            account = {
+                "email": f"{mail_source}_placeholder_{int(_t.time())}@placeholder.local",
+                "password": "",
+                "client_id": "",
+                "refresh_token": "",
+                "relay_url": "",
+                "kind": mail_source,
+            }
     elif req.email:
         account = db.claim_account(req.email)
         if not account:
@@ -300,6 +313,8 @@ def api_register(req: RegisterReq):
         "otp_timeout": int(req.otp_timeout),
         "allow_existing_login": req.allow_existing_login,
         "want_2fa": req.want_2fa,
+        "specified_email": specified_email,
+        "strict_email": req.strict_email,
     }
     run_id = registrar.start_registration(account, options)
     logger.info(f"[run] {run_id} -> {account['email']} (mail_source={mail_source})")

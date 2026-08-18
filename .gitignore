@@ -65,6 +65,10 @@ chatgpt_reg_*
 node_modules/
 openai-sentinel-demo/
 
+# ──────────────── WebUI 构建产物（vite）────────────────
+/static/
+webui/static/
+
 # ──────────────── 工作流追踪文件（如果主人启过 AUTH_TRACE_DUMP=1）────────────────
 outputs/
 auth_trace_*.jsonl

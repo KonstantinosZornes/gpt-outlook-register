@@ -17,6 +17,8 @@ import threading
 import time
 from typing import Optional
 
+from proxy_utils import mask_proxy_url, parse_proxy_pool
+
 from . import db, registrar
 from mail_providers import MailProviderError, get_provider_class
 
@@ -27,16 +29,6 @@ class AutoLoopState:
     STOPPED = "stopped"
     RUNNING = "running"
     PAUSED = "paused"
-
-
-def _parse_proxy_pool(text: str) -> list[str]:
-    """把多行代理字符串拆成列表。空行 / # 开头注释跳过。"""
-    out: list[str] = []
-    for line in (text or "").splitlines():
-        s = line.strip()
-        if s and not s.startswith("#"):
-            out.append(s)
-    return out
 
 
 class AutoLoopController:
@@ -97,7 +89,7 @@ class AutoLoopController:
             # 解析并发参数
             self._concurrency = max(1, min(20, int(self._options.get("concurrency") or 1)))
             pool_text = self._options.get("proxy_pool") or ""
-            self._proxy_pool = _parse_proxy_pool(pool_text)
+            self._proxy_pool = parse_proxy_pool(pool_text)
             # 目标成功数（0=不限量）
             self._target_count = max(0, int(self._options.get("target_count") or 0))
             # 启 manage 线程
@@ -295,7 +287,7 @@ class AutoLoopController:
         """单 worker 循环：claim → 跑 → 等结束 → 继续。"""
         idle_round = 0
         proxy = self._proxy_for_worker(worker_id)
-        logger.info(f"[worker-{worker_id}] 启动 (proxy={proxy or '直连'})")
+        logger.info(f"[worker-{worker_id}] 启动 (proxy={mask_proxy_url(proxy) or '直连'})")
 
         while True:
             # 检查停止

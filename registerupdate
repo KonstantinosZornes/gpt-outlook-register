@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -u
+
+BASE_DIR="/root/codes"
+
+update_and_restart() {
+  local dir="$1"
+  local service="$2"
+  local path="$BASE_DIR/$dir"
+
+  echo "===== Checking $dir ====="
+
+  if [ ! -d "$path/.git" ]; then
+    echo "Skip: $path is not a git repository"
+    return 1
+  fi
+
+  cd "$path" || return 1
+
+  local before_head
+  local after_head
+  local before_submodules
+  local after_submodules
+
+  before_head="$(git rev-parse HEAD 2>/dev/null || true)"
+  before_submodules="$(git submodule status --recursive 2>/dev/null || true)"
+
+  if ! git pull --recurse-submodules; then
+    echo "Pull failed: $dir"
+    return 1
+  fi
+
+  after_head="$(git rev-parse HEAD 2>/dev/null || true)"
+  after_submodules="$(git submodule status --recursive 2>/dev/null || true)"
+
+  if [ "$before_head" != "$after_head" ] || [ "$before_submodules" != "$after_submodules" ]; then
+    echo "Updated: $dir"
+
+    if [ "$dir" = "gpt-outlook-register" ]; then
+      echo "Building frontend: $dir"
+      if ! (cd "$path/webui/frontend" && npm ci && npm run build); then
+        echo "Frontend build failed: $dir"
+        return 1
+      fi
+    fi
+
+    echo "Restarting: $service"
+
+    if systemctl restart "$service"; then
+      echo "Restarted: $service"
+    else
+      echo "Restart failed: $service"
+      return 1
+    fi
+  else
+    echo "No update: $dir"
+  fi
+}
+
+update_and_restart "FreeGrok" "freegrok-webui.service"
+update_and_restart "GPTFree" "GPTFree.service"
+update_and_restart "gpt-outlook-register" "gpt-outlook-webui.service"
+
+echo "Done."

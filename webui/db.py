@@ -928,6 +928,23 @@ def finish_run(run_id: str, status: str, error: str = "", category: str = "") ->
         con.commit()
 
 
+def update_run_email(run_id: str, email: str) -> None:
+    """非号池模式（CF / OEP）：claim 后把 runs.email 从占位符换成真实邮箱。
+
+    不强制小写：OEP 平台邮箱需保留原始大小写。
+    """
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        return
+    with _lock:
+        con = _conn()
+        con.execute(
+            "UPDATE runs SET email=? WHERE run_id=?",
+            (email, run_id),
+        )
+        con.commit()
+
+
 def list_runs(limit: int = 50) -> list[dict]:
     con = _conn()
     cur = con.execute(

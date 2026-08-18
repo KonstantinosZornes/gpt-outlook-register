@@ -24,7 +24,7 @@ const fields = computed(() => current.value?.config_fields || [])
 
 // 池化 provider（Outlook 这类导号进来的）连通性绑在具体某个号上，
 // 没号可测；测试按钮只对非池化的显示。
-const canTest = computed(() => !!current.value && !current.value.pooled)
+const canTest = computed(() => !!current.value && (!current.value.pooled || current.value.platform))
 
 /** 密码类字段已存过 → 输入框留空表示"不修改"，提示语要说清楚 */
 function phFor(f) {
@@ -129,8 +129,8 @@ load()
         <!-- 能力说明：让主人一眼看出这种邮箱是怎么工作的 -->
         <el-form-item v-if="current">
           <div class="caps">
-            <el-tag size="small" :type="current.pooled ? 'warning' : 'success'">
-              {{ current.pooled ? '号池型：需先导入号，用完要补' : '自建型：自动生成地址，无限量' }}
+            <el-tag size="small" :type="current.platform ? 'warning' : (current.pooled ? 'warning' : 'success')">
+              {{ current.platform ? '平台型：远端号池，本地不导入' : (current.pooled ? '号池型：需先导入号，用完要补' : '自建型：自动生成地址，无限量') }}
             </el-tag>
             <el-tag size="small" :type="current.ephemeral ? 'success' : 'info'">
               {{ current.ephemeral ? '每次新地址' : '固定地址' }}
@@ -153,13 +153,13 @@ load()
         </el-form-item>
 
         <el-alert
-          v-if="current && !current.pooled && fields.length"
+          v-if="current && !current.pooled && !current.platform && fields.length"
           type="warning" :closable="false" show-icon
           title="自建邮箱需要把域名的 catch-all 收件正确转发到服务端，否则收不到验证码。"
         />
 
         <el-alert
-          v-if="current && current.pooled"
+          v-if="current && current.pooled && !current.platform"
           type="info" :closable="false" show-icon
           :title="`${current.display_name} 不需要在这里配置，去「导入邮箱」页把号导进来即可。`"
         />

@@ -28,6 +28,7 @@
         CF catch-all         False   True      自己造随机地址，无限
         Gmail / 通用 IMAP     True    False     同 Outlook
         iCloud relay 中转     False   False     固定地址但无密码 ⚠️
+        OEP 平台              False   False     远端平台管池，本地不 claim
 
     ⚠️ 最后一行是上次 iCloud 失败的根因：pooled=False 让它避开了号池逻辑，
        但 ephemeral=False 意味着 OpenAI 会当老号处理 → 要密码 → 401。
@@ -189,6 +190,8 @@ class MailProvider(ABC):
     # ── 能力声明（详见模块 docstring）─────────────────────
     pooled: bool = False                 # 是否从号池 claim
     ephemeral: bool = False              # 地址是否每次新建
+    platform: bool = False               # 远端平台管池（OEP 这类），本地不 claim
+    supports_specified_email: bool = False  # 单次注册可指定邮箱（跳过随机 claim）
 
     # "OpenAI 说这个邮箱已经注册过了" 算不算失败。
     #   False（默认）想注册新号却撞上老号 → 这个号没用了，标记失败
@@ -278,6 +281,19 @@ class MailProvider(ABC):
         """标记本号废掉。非池化 provider 默认无操作。"""
         if self.pooled:
             self._dead = True
+
+    def set_specified_email(self, email: str) -> tuple[bool, str]:
+        """指定本次注册用的邮箱。默认不支持。
+
+        返回 (ok, message)。ok=False 时调用方按 strict_email 决定是停还是回退。
+        """
+        return False, f"{self.display_name} 不支持指定邮箱"
+
+    def on_success(self, detail: str = "") -> None:
+        """注册成功后的生命周期钩子。远端平台可在这里回传 complete。"""
+
+    def on_release(self, reason: str = "") -> None:
+        """中途放弃 / 网络错误时的生命周期钩子。远端平台可在这里把号还回池。"""
 
     # ────────────────────────────────────────────────────
     #  导入格式（pooled provider 覆盖）
@@ -412,6 +428,8 @@ def list_providers() -> list[dict]:
             "display_name": c.display_name,
             "pooled": c.pooled,
             "ephemeral": c.ephemeral,
+            "platform": getattr(c, "platform", False),
+            "supports_specified_email": getattr(c, "supports_specified_email", False),
             "line_segments": c.line_segments,
             "import_hint": c.import_hint,
             "import_placeholder": c.import_placeholder,
