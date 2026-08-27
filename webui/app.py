@@ -576,7 +576,7 @@ def api_get_sms_config():
 
 class SaveSmsConfigReq(BaseModel):
     sms_enabled: Optional[str] = None              # "0" / "1"
-    sms_provider: Optional[str] = None             # smsbower / herosms
+    sms_provider: Optional[str] = None             # smsbower / herosms / grizzlysms
     sms_api_key: Optional[str] = None              # 传 '***' 表示不修改
     sms_country: Optional[str] = None              # ID 或国家代码（'52' / 'th'）
     sms_service: Optional[str] = None              # OpenAI = 'dr'

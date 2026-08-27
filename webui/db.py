@@ -1207,11 +1207,11 @@ def get_sms_config() -> dict:
     """返回 SMS 接码配置（api_key 隐藏明文）。
 
     sms_enabled:        '0'/'1' 是否启用接码（命中 add-phone 时才会用）
-    sms_provider:       smsbower
+    sms_provider:       smsbower / herosms / grizzlysms
     sms_country:        国家代码或 ID（推荐 '52' = Thailand，OpenAI 走 SMS 的唯一稳定国家）
     sms_service:        服务代码（OpenAI = 'dr'）
-    sms_max_price:      号码最高单价（SmsBower / SmsBower 用，单位平台货币；空 / -1 = 不限）
-    sms_reuse_phone:    '0'/'1' 同号复用（SmsBower / SmsBower 支持，省钱）
+    sms_max_price:      号码最高单价（SmsBower / HeroSMS / GrizzlySMS 用，单位平台货币；空 / -1 = 不限）
+    sms_reuse_phone:    '0'/'1' 同号复用（sms-activate 协议系支持，省钱）
     sms_phone_success_max: 同号最多复用几次（默认 3）
     sms_auto_country:   '0'/'1' 自动选最优国家（按价格 + 库存）
     sms_auto_min_stock: 自动选国家最低库存（默认 20）
@@ -1240,7 +1240,7 @@ def get_sms_config() -> dict:
 def save_sms_config(data: dict) -> None:
     """保存 SMS 配置。sms_api_key 传 '***' 表示不修改。"""
     # 校验 provider
-    valid_providers = {"smsbower", "herosms"}
+    valid_providers = {"smsbower", "herosms", "grizzlysms"}
     if "sms_provider" in data:
         p = str(data["sms_provider"]).strip().lower()
         if p not in valid_providers:

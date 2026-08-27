@@ -1086,7 +1086,7 @@ class AuthFlow:
 
     def _do_sms_loop(self, ctrl) -> str:
         """SMS 接码循环逻辑（for 0..max_attempts）。"""
-        # provider 信息（目前只支持 SmsBower）
+        # provider 信息（sms-activate 协议系：SmsBower / HeroSMS / GrizzlySMS）
         provider_key = (getattr(ctrl, "provider_key", "") or "").lower()
 
         # 优先从 controller.config 读（前端配置） → 环境变量兜底 → 用默认

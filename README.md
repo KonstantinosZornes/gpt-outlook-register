@@ -265,6 +265,7 @@ WebUI「📱 接码配置」Tab 启用接码后，命中 add-phone 时会自动�
 |---|---|---|
 | **SmsBower** | smsbower.page | V2 API + auto-resend |
 | **HeroSMS** | hero-sms.com | 180+ 国家，SMS-Activate 继任平台 |
+| **GrizzlySMS** | grizzlysms.com | sms-activate 协议系 |
 
 
 
@@ -281,11 +282,11 @@ WebUI「📱 接码配置」Tab 启用接码后，命中 add-phone 时会自动�
 | 配置项 | 说明 |
 |---|---|
 | `sms_enabled` | 总开关；关闭时回退到 `OPENAI_PHONE_NUMBER` 环境变量路径 |
-| `sms_provider` | herosms / smsbower / sms_activate |
+| `sms_provider` | herosms / smsbower / grizzlysms / sms_activate |
 | `sms_country` | 国家代码或 ID，默认 `52`（Thailand） |
 | `sms_service` | OpenAI = `dr` |
-| `sms_max_price` | 单号最高价格（HeroSMS / SmsBower 用，平台货币单位） |
-| `sms_reuse_phone` | 同号复用（HeroSMS / SmsBower） |
+| `sms_max_price` | 单号最高价格（HeroSMS / SmsBower / GrizzlySMS 用，平台货币单位） |
+| `sms_reuse_phone` | 同号复用（HeroSMS / SmsBower / GrizzlySMS） |
 | `sms_phone_success_max` | 同号最多复用 N 次 |
 | `sms_auto_country` | 自动选最优国家（限白名单） |
 

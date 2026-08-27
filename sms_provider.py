@@ -1,4 +1,4 @@
-"""SMS 接码 provider 抽象 + SmsBower 实现。
+"""SMS 接码 provider 抽象 + sms-activate 协议系实现（SmsBower / HeroSMS / GrizzlySMS）。
 
 设计参考：asz798838958/GeniusFKoai 的 core/base_sms.py，但裁剪掉浏览器回调相关代码、
 仅保留纯协议注册需要的两段流程：
@@ -140,7 +140,7 @@ def country_label(country_id) -> str:
 
 
 # ---------------------------------------------------------------------------
-# SmsBower / SMSBower —— 共享 API 协议
+# sms-activate 协议系（SmsBower / HeroSMS / GrizzlySMS 共用）
 # ---------------------------------------------------------------------------
 
 SMS_DEFAULT_SERVICE = "dr"
@@ -220,8 +220,8 @@ def _make_sms_candidate(activation_id: str, source: str, code) -> Optional[dict]
     }
 
 
-class SmsBowerProvider(BaseSmsProvider):
-    """sms-activate 协议系 provider（SmsBower / HeroSMS 共用）。"""
+class ActivateSmsProvider(BaseSmsProvider):
+    """sms-activate 协议系 provider（SmsBower / HeroSMS / GrizzlySMS 共用）。"""
 
     DEFAULT_BASE_URL = "https://smsbower.page/stubs/handler_api.php"
     auto_report_success_on_code = False  # 等业务侧确认才报成功（便于号码复用）
@@ -255,7 +255,12 @@ class SmsBowerProvider(BaseSmsProvider):
 
     @property
     def name(self) -> str:
-        return "HeroSMS" if "hero-sms.com" in self.base_url else "SmsBower"
+        base = self.base_url.lower()
+        if "hero-sms.com" in base:
+            return "HeroSMS"
+        if "grizzlysms" in base:
+            return "GrizzlySMS"
+        return "SmsBower"
 
     # ---- HTTP ----
 
@@ -847,7 +852,7 @@ class SmsBowerProvider(BaseSmsProvider):
 def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
     """从配置创建 provider 实例。
 
-    provider_key: smsbower / herosms
+    provider_key: smsbower / herosms / grizzlysms
     config 字段：sms_api_key / sms_country / sms_service / sms_max_price /
                 sms_reuse_phone / sms_phone_success_max
     """
@@ -866,7 +871,7 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
     succ_max = max(0, _safe_int(config.get("sms_phone_success_max"), 3))
 
     if pk in ("smsbower", "sms_bower"):
-        return SmsBowerProvider(api_key=api_key,
+        return ActivateSmsProvider(api_key=api_key,
                                 default_service=service,
                                 default_country=country or SMS_DEFAULT_COUNTRY,
                                 max_price=max_price,
@@ -875,8 +880,18 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
                                 reuse_phone_to_max=reuse,
                                 phone_success_max=succ_max)
     if pk in ("herosms", "hero_sms"):
-        return SmsBowerProvider(api_key=api_key,
+        return ActivateSmsProvider(api_key=api_key,
                                 base_url="https://hero-sms.com/stubs/handler_api.php",
+                                default_service=service,
+                                default_country=country or SMS_DEFAULT_COUNTRY,
+                                max_price=max_price,
+                                fixed_price=fixed_price,
+                                proxy=proxy,
+                                reuse_phone_to_max=reuse,
+                                phone_success_max=succ_max)
+    if pk in ("grizzlysms", "grizzly", "grizzly_sms", "grizzly-sms"):
+        return ActivateSmsProvider(api_key=api_key,
+                                base_url="https://api.grizzlysms.com/stubs/handler_api.php",
                                 default_service=service,
                                 default_country=country or SMS_DEFAULT_COUNTRY,
                                 max_price=max_price,
@@ -933,7 +948,7 @@ class PhoneCallbackController:
         """阶段 1：租手机号（已带 +）。"""
         provider = self._provider()
         # 同号复用锁（SmsBower 系列才用，防止两个注册任务并发抢同一个 cache）
-        if isinstance(provider, SmsBowerProvider) and not self._verify_lock_acquired:
+        if isinstance(provider, ActivateSmsProvider) and not self._verify_lock_acquired:
             _SMS_VERIFY_LOCK.acquire()
             self._verify_lock_acquired = True
 
@@ -944,7 +959,7 @@ class PhoneCallbackController:
         effective_country = self.country
         country_candidates: list[str] = []
 
-        if self.auto_select_country and isinstance(provider, SmsBowerProvider):
+        if self.auto_select_country and isinstance(provider, ActivateSmsProvider):
             if allowed_list:
                 self.log(f"🔍 自动选号: 从主人勾选的 {len(allowed_list)} 个国家随机尝试")
                 try:

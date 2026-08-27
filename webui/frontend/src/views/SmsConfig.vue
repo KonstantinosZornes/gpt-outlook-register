@@ -31,6 +31,10 @@ const countryOptions = computed(() =>
   })),
 )
 
+const providerName = computed(() =>
+  ({ smsbower: 'SmsBower', herosms: 'HeroSMS', grizzlysms: 'GrizzlySMS' }[provider.value] || 'SmsBower'),
+)
+
 async function loadCountries(p) {
   countriesLoading.value = true
   try {
@@ -125,6 +129,10 @@ onActivated(() => load())
               <span>HeroSMS（取消后 20 分钟自动退款）</span>
               <a :href="'https://hero-sms.com/?ref=738021'" target="_blank" class="sms-reg-link" @click.stop>前往注册 ↗</a>
             </el-radio>
+            <el-radio value="grizzlysms">
+              <span>GrizzlySMS（sms-activate 协议）</span>
+              <a :href="'https://grizzlysms.com'" target="_blank" class="sms-reg-link" @click.stop>前往注册 ↗</a>
+            </el-radio>
           </el-radio-group>
         </el-form-item>
 
@@ -206,7 +214,7 @@ onActivated(() => load())
     </el-card>
 
     <FooterToolbar>
-      <template #left>接码平台：{{ provider === 'herosms' ? 'HeroSMS' : 'SmsBower' }}{{ allowed.length ? ` · 允许国家 ${allowed.length} 个` : ' · 全平台随机选号' }}</template>
+      <template #left>接码平台：{{ providerName }}{{ allowed.length ? ` · 允许国家 ${allowed.length} 个` : ' · 全平台随机选号' }}</template>
       <el-button :loading="testing" @click="test">测试余额</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
     </FooterToolbar>
